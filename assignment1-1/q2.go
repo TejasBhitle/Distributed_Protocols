@@ -2,12 +2,14 @@ package cos418_hw1_1
 
 import (
 	"bufio"
-	"fmt"
 	"io"
 	"log"
 	"os"
 	"strconv"
+	"sync"
 )
+
+const ConstChannelBuffer = 1005
 
 // Sum numbers from channel `nums` and output sum to `out`.
 // You should only output to `out` once.
@@ -15,10 +17,13 @@ import (
 func sumWorker(nums chan int, out chan int) {
 	// TODO: implement me
 	// HINT: use for loop over `nums`
+
+	//fmt.Println("SumWorker started")
 	sum := 0
 	for num := range nums {
 		sum += num
 	}
+	//fmt.Printf("Sum is %v\n", sum)
 	out <- sum
 }
 
@@ -27,7 +32,7 @@ func sumWorker(nums chan int, out chan int) {
 // `sumWorker` to find the sum of the values concurrently.
 // You should use `checkError` to handle potential errors.
 // Do NOT modify function signature.
-func sum(num int, fileName string) int {
+func sum(numOfChannels int, fileName string) int {
 	// TODO: implement me
 	// HINT: use `readInts` and `sumWorkers`
 	// HINT: used buffered channels for splitting numbers between workers
@@ -44,34 +49,53 @@ func sum(num int, fileName string) int {
 
 	// Init the channels
 	var channels []chan int
-	for i := 0; i < num; i++ {
-		channels = append(channels, make(chan int))
+	for i := 0; i < numOfChannels; i++ {
+		channels = append(channels, make(chan int, ConstChannelBuffer))
 	}
 
-	fmt.Println("Channel init done")
-
-	// push elements in a cyclic fashion
+	// push elements in a cyclic fashion into the channels
 	currentChannelIndex := 0
-	for _, i := range nums {
-		fmt.Println(i)
-		channels[currentChannelIndex%num] <- i
+	for _, x := range nums {
+		channels[currentChannelIndex%numOfChannels] <- x
 		currentChannelIndex++
 	}
 
-	fmt.Println("elements pushed in channel")
-	
-	out := make(chan int)
-	for i := 0; i < num; i++ {
-		//close(channels[i])
-		go sumWorker(channels[i], out)
-		//go close(channels[i]) // close channel after work is done
+	//fmt.Println("all elements pushed in channel")
+	for i := 0; i < numOfChannels; i++ {
+		close(channels[i])
 	}
 
-	fmt.Println("triggering final step")
+	//fmt.Println("channels closed")
+	waitGroup := sync.WaitGroup{}
+	waitGroup.Add(numOfChannels)
 
-	go sumWorker(out, out)
+	outTemp := make(chan int, ConstChannelBuffer)
+	for i := 0; i < numOfChannels; i++ {
+
+		// i was getting incremented before it being accessed by go block below. hence created this local variable
+		iCopy := i
+
+		go func() {
+			defer waitGroup.Done()
+			sumWorker(channels[iCopy], outTemp)
+		}()
+	}
+
+	waitGroup.Wait()
+	//fmt.Println("Triggering final merge")
+	close(outTemp)
+
+	out := make(chan int, ConstChannelBuffer)
+
+	waitGroup = sync.WaitGroup{}
+	waitGroup.Add(1)
+	go func() {
+		defer waitGroup.Done()
+		sumWorker(outTemp, out)
+	}()
+
+	waitGroup.Wait()
 	return <-out
-	return 0
 }
 
 // Read a list of integers separated by whitespace from `r`.
