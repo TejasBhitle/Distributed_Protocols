@@ -44,7 +44,7 @@ func doReduce(
 	for i := 0; i < nMap; i++ {
 		reduceFileName := reduceName(jobName, i, reduceTaskNumber)
 
-		reduceFile, fileErr := os.Create(reduceFileName)
+		reduceFile, fileErr := os.Open(reduceFileName)
 		checkError(fileErr)
 
 		decoder := json.NewDecoder(reduceFile)
@@ -62,7 +62,7 @@ func doReduce(
 
 	// 2. Reducing the values and writing to the merged file
 	mergeFileName := mergeName(jobName, reduceTaskNumber)
-	mergeFile, err := os.Open(mergeFileName)
+	mergeFile, err := os.Create(mergeFileName)
 	defer mergeFile.Close()
 	checkError(err)
 
