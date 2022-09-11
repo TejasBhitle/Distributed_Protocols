@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 	"unicode"
 )
 
@@ -17,15 +16,46 @@ func mapF(document string, value string) (res []mapreduce.KeyValue) {
 	// TODO: you have to write this function
 
 	keyValues := make([]mapreduce.KeyValue, 0)
-	words := strings.Fields(value)
 
-	for _, word := range words {
-		if isValidWord(word) {
-			keyValue := mapreduce.KeyValue{Key: word, Value: "1"}
-			keyValues = append(keyValues, keyValue)
+	//// This approach gives incorrect counts
+	//words := strings.Fields(value)
+	//
+	//for _, word := range words {
+	//	if isValidWord(word) {
+	//		keyValue := mapreduce.KeyValue{Key: word, Value: "1"}
+	//		keyValues = append(keyValues, keyValue)
+	//	}
+	//}
+
+	i := 0
+	j := 0
+	length := len(value)
+
+	// grabbing words char by char
+	for j < length {
+		if !unicode.IsLetter(rune(value[j])) {
+			keyValues = addWord(keyValues, value[i:j])
+
+			i = j
+			for i < length && !unicode.IsLetter(rune(value[i])) {
+				i++
+			}
+			j = i
+
+		} else {
+			j++
 		}
 	}
+	if i < length && j <= length { // <- once for last word if exists
+		keyValues = addWord(keyValues, value[i:j])
+	}
 
+	return keyValues
+}
+
+func addWord(keyValues []mapreduce.KeyValue, word string) []mapreduce.KeyValue {
+	keyValue := mapreduce.KeyValue{Key: word, Value: "1"}
+	keyValues = append(keyValues, keyValue)
 	return keyValues
 }
 
