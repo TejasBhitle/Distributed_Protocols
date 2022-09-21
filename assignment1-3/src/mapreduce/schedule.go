@@ -2,7 +2,6 @@ package mapreduce
 
 import (
 	"fmt"
-	"strconv"
 	"sync"
 )
 
@@ -29,9 +28,10 @@ func (mr *Master) schedule(phase jobPhase) {
 	// TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
 	//
 
+	//fmt.Println("\nSchedule " + phase)
+
 	// Add jobs to pendingTasks
 	pendingTasksChan := make(chan DoTaskArgs, ntasks+1)
-	fmt.Println("pendingTasksChan created")
 	for i := 0; i < ntasks; i++ {
 		pendingTasksChan <- DoTaskArgs{
 			JobName:       mr.jobName,
@@ -42,53 +42,55 @@ func (mr *Master) schedule(phase jobPhase) {
 		}
 	}
 
-	fmt.Println("tasks created " + strconv.Itoa(ntasks))
-
 	var waitGroup sync.WaitGroup
 	waitGroup.Add(ntasks)
-	fmt.Println("waitgroup init")
 
-	availableWorkersChan := make(chan string, 1000)
-	go func() {
-		// if any new worker registers, push it to available workers chan
-		fmt.Println("[init availableWorkersChan]")
-		for {
-			workerName := <-mr.registerChannel
-			fmt.Println("[" + workerName + " added to availableWorkersChan]")
-			availableWorkersChan <- workerName
-		}
-	}()
-
-	count := 0 // todo delete later
 	// listening to workers channel for availability
-	go func() {
-		for {
-			//fmt.Println("[inside for]")
-			workerName := <-availableWorkersChan
-			taskArgs := <-pendingTasksChan
-			//fmt.Println("[inside for] " + workerName + " : " + taskArgs.JobName)
-
-			ok := call(workerName, "Worker.DoTask", taskArgs, nil)
-			if ok == false {
-				// task is not done. add it back to pending
-				pendingTasksChan <- taskArgs
-				fmt.Println("[inside for] adding back to pending")
-
-			} else {
-				// task is complete
-				//fmt.Println("[inside for] waitgroup Done")
-				waitGroup.Done()
-				count++
-
-				// add the free worker to available channel queue
-				availableWorkersChan <- workerName
-			}
-		}
-	}()
+	for i := 0; i < ntasks; i++ {
+		go func() {
+			phase := phase
+			executeWorker(mr.registerChannel, pendingTasksChan, &waitGroup, string(phase))
+		}()
+	}
 
 	// Waiting for all the jobs to execute
 	waitGroup.Wait()
-	fmt.Println("startScheduler finished " + phase + " : ")
+	//fmt.Println("startScheduler finished " + phase)
 
 	debug("Schedule: %v phase done\n", phase)
+}
+
+func executeWorker(
+	registerChannel chan string,
+	pendingTasksChan chan DoTaskArgs,
+	waitGroup *sync.WaitGroup,
+	phase string) {
+
+	// read available worker and read pending Tasks
+
+	reply := ShutdownReply{}
+	workerName := <-registerChannel
+	//fmt.Println("[inside for] worker pulled" + workerName + " : " + phase)
+
+	taskArgs := <-pendingTasksChan
+	//fmt.Println("[inside for] task pulled" + string(rune(taskArgs.TaskNumber)) + " : " + phase)
+
+	ok := call(workerName, "Worker.DoTask", taskArgs, &reply)
+	if ok == false {
+		// task is not done. add it back to pending
+		fmt.Println("[RPC fail] adding back to pending" + phase)
+		go func() {
+			pendingTasksChan <- taskArgs
+			executeWorker(registerChannel, pendingTasksChan, waitGroup, phase)
+		}()
+
+	} else {
+		// task is complete, release the waitGroup
+		waitGroup.Done()
+		//fmt.Println("[inside for] waitgroup Done " + phase)
+
+		// add the free worker to available channel queue
+		registerChannel <- workerName
+		//fmt.Println("[inside for] worker added back " + workerName + " " + phase)
+	}
 }

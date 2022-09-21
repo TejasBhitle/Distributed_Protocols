@@ -1,3 +1,5 @@
+//go:build unittest
+
 package mapreduce
 
 import (
@@ -14,9 +16,9 @@ import (
 )
 
 const (
-	nNumber = 100000
-	nMap    = 100
-	nReduce = 50
+	nNumber = 10
+	nMap    = 2
+	nReduce = 1
 )
 
 // Create input file with N numbers
@@ -160,7 +162,9 @@ func TestSequentialMany(t *testing.T) {
 }
 
 func TestBasic(t *testing.T) {
+	debug("test basic started")
 	mr := setup()
+	debug("mr setup done")
 	for i := 0; i < 2; i++ {
 		go RunWorker(mr.address, port("worker"+strconv.Itoa(i)),
 			MapFunc, ReduceFunc, -1)
