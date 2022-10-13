@@ -27,7 +27,7 @@ func runTest(t *testing.T, topFile string, eventsFile string, snapFiles []string
 		sim.logger.PrettyPrint()
 		fmt.Println()
 	}
-	// Verify that the number of tokens are preserved in the snapshots
+	// Verify that the number of tokens are preserved in the snapshotsMap
 	checkTokens(sim, actualSnaps)
 	// Verify against golden files
 	expectedSnaps := make([]*SnapshotState, 0)
@@ -65,7 +65,7 @@ func Test8NodesSequentialSnapshots(t *testing.T) {
 	runTest(
 		t,
 		"8nodes.top",
-		"8nodes-sequential-snapshots.events",
+		"8nodes-sequential-snapshotsMap.events",
 		[]string{
 			"8nodes-sequential-snapshots0.snap",
 			"8nodes-sequential-snapshots1.snap",
@@ -76,7 +76,7 @@ func Test8NodesConcurrentSnapshots(t *testing.T) {
 	runTest(
 		t,
 		"8nodes.top",
-		"8nodes-concurrent-snapshots.events",
+		"8nodes-concurrent-snapshotsMap.events",
 		[]string{
 			"8nodes-concurrent-snapshots0.snap",
 			"8nodes-concurrent-snapshots1.snap",
