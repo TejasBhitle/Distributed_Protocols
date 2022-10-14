@@ -3,6 +3,7 @@ package chandy_lamport
 import (
 	"log"
 	"math/rand"
+	"sync"
 )
 
 // Max random delay added to packet delivery
@@ -24,6 +25,8 @@ type Simulator struct {
 	servers        map[string]*Server // key = server ID
 	logger         *Logger
 	// TODO: ADD MORE FIELDS HERE
+
+	snapshotsCountMap sync.Map // K,V -> snapshotId, mapOfResponses
 }
 
 func NewSimulator() *Simulator {
@@ -32,6 +35,7 @@ func NewSimulator() *Simulator {
 		0,
 		make(map[string]*Server),
 		NewLogger(),
+		sync.Map{},
 	}
 }
 
@@ -112,6 +116,16 @@ func (sim *Simulator) StartSnapshot(serverId string) {
 	/*
 		1. send the ss marker to serverId (Call -> StartSnapshot)
 	*/
+	_, ok := sim.snapshotsCountMap.Load(snapshotId)
+	if ok {
+		// sim should not start the same snapshot again.
+		return
+	}
+	mapOfResponses := make(map[string]bool)
+	for serverId, _ := range sim.servers {
+		mapOfResponses[serverId] = false
+	}
+	sim.snapshotsCountMap.Store(snapshotId, mapOfResponses)
 	sim.servers[serverId].StartSnapshot(snapshotId)
 
 }
@@ -121,6 +135,19 @@ func (sim *Simulator) StartSnapshot(serverId string) {
 func (sim *Simulator) NotifySnapshotComplete(serverId string, snapshotId int) {
 	sim.logger.RecordEvent(sim.servers[serverId], EndSnapshot{serverId, snapshotId})
 	// TODO: IMPLEMENT ME
+
+	_mapOfResponses, _ := sim.snapshotsCountMap.Load(snapshotId)
+	mapOfResponses := _mapOfResponses.(map[string]bool)
+	mapOfResponses[serverId] = true
+	sim.snapshotsCountMap.Store(snapshotId, mapOfResponses)
+
+	for _, response := range mapOfResponses {
+		if !response {
+			break
+		}
+	}
+	sim.CollectSnapshot(snapshotId)
+
 }
 
 // Collect and merge snapshot state from all the servers.
@@ -128,5 +155,18 @@ func (sim *Simulator) NotifySnapshotComplete(serverId string, snapshotId int) {
 func (sim *Simulator) CollectSnapshot(snapshotId int) *SnapshotState {
 	snap := SnapshotState{snapshotId, make(map[string]int), make([]*SnapshotMessage, 0)}
 	// TODO: IMPLEMENT ME
+
+	for _, server := range sim.servers {
+		snapshotState := server.collectSnapshotState(snapshotId)
+
+		for key, value := range snapshotState.tokens {
+			snap.tokens[key] = value
+		}
+
+		for _, snapshotMsg := range snapshotState.messages {
+			snap.messages = append(snap.messages, snapshotMsg)
+		}
+	}
+
 	return &snap
 }

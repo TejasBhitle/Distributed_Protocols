@@ -18,16 +18,17 @@ type Server struct {
 	inboundLinks  map[string]*Link // key = link.src
 	// TODO: ADD MORE FIELDS HERE
 
-	snapshotsMap       sync.Map   // K,V -> snapshotId, SnapshotStatus (because of multiple snapshots)
+	snapshotsMap       sync.Map   // K,V -> snapshotId, *SnapshotStatus (because of multiple snapshots)
 	startSnapShotMutex sync.Mutex // to make startSnapShot() thread safe
 
-	numOfOnGoingSnapshots      int // Access this using the below mutex only
+	numOfOnGoingSnapshots      int // Access this using the below sync methods only
 	numOfOnGoingSnapshotsMutex sync.RWMutex
 }
 
 type SnapshotStatus struct {
-	isOngoing     bool
-	snapshotState SnapshotState
+	isOngoing                      bool
+	snapshotState                  SnapshotState
+	isMarkerReceivedBackFromServer map[string]bool // K,V -> neighbourServerId, boolean that says whether marker was returned from that server
 }
 
 // A unidirectional communication channel between two servers
@@ -105,8 +106,70 @@ func (server *Server) HandlePacket(src string, message interface{}) {
 	// TODO: IMPLEMENT ME
 
 	/*
-		write switch case on message type
+		write switch cases on message type
 	*/
+
+	switch _ := message.(type) {
+	case TokenMessage:
+
+		// Basic Token update (independent of chandy-lamport algo)
+		// This update should not be affected by our snapshotting code
+		server.Tokens += message.(TokenMessage).numTokens
+
+		// if no ongoing snapshots -> do nothing further
+		numOfOnGoingSnapshots := server.getNumOfOnGoingSnapshots()
+		if numOfOnGoingSnapshots == 0 {
+			// nothing to handle
+			return
+		}
+
+		// forEach ongoing snapshots -> add the incoming token as tracked token from that inbound channel
+		server.snapshotsMap.Range(func(snapshotId, _snapshotStatus interface{}) bool {
+
+			snapshotStatus := _snapshotStatus.(*SnapshotStatus)
+			if snapshotStatus.isOngoing && !snapshotStatus.isMarkerReceivedBackFromServer[src] {
+				token := SnapshotMessage{
+					src:     src,
+					dest:    server.Id,
+					message: message,
+				}
+				snapshotStatus.snapshotState.messages = append(snapshotStatus.snapshotState.messages, &token)
+			}
+			return true // Range method expects a true; otherwise it stops iterating further.
+		})
+
+		break
+
+	case MarkerMessage:
+		snapshotId := message.(MarkerMessage).snapshotId
+
+		snapshotAlreadyStarted := !server.startSnapshotOnlyIfNotAlreadyStarted(snapshotId)
+		if snapshotAlreadyStarted {
+
+			_snapshotStatus, _ := server.snapshotsMap.Load(snapshotId)
+			snapshotStatus := _snapshotStatus.(*SnapshotStatus)
+			snapshotStatus.isMarkerReceivedBackFromServer[src] = true
+
+			// check if marker is received from all inbound channels
+			for _, isMarkerReceived := range snapshotStatus.isMarkerReceivedBackFromServer {
+				if !isMarkerReceived {
+					// not all markers have been received yet from inbound channels
+					break
+				}
+			}
+			// all markers received from inbound channels -> snapshot complete for this server
+			snapshotStatus.isOngoing = false
+			server.addToNumOfOnGoingSnapshots(-1)
+
+			// notify this event to the simulator
+			go server.sim.NotifySnapshotComplete(server.Id, snapshotId)
+
+		} else {
+			// This is the first time, the marker has arrived.
+			go server.StartSnapshot(snapshotId)
+		}
+		break
+	}
 
 }
 
@@ -114,25 +177,6 @@ func (server *Server) HandlePacket(src string, message interface{}) {
 // This should be called only once per server.
 func (server *Server) StartSnapshot(snapshotId int) {
 	// TODO: IMPLEMENT ME
-
-	// Critical Section Impl for [This should be called only once per server.]
-	_, ok := server.snapshotsMap.Load(snapshotId)
-	if ok {
-		return
-	}
-	server.startSnapShotMutex.Lock()
-	{
-		// double check if snapshot already started;  if yes then return
-		_, ok := server.snapshotsMap.Load(snapshotId)
-		if ok {
-			server.startSnapShotMutex.Unlock()
-			return
-		}
-
-		// store the empty snapshot first to avoid starting same snapshotId again
-		server.snapshotsMap.Store(snapshotId, &SnapshotStatus{})
-	}
-	server.startSnapShotMutex.Unlock()
 
 	/**
 	1. set the current snapshot as ongoing for this server
@@ -146,6 +190,7 @@ func (server *Server) StartSnapshot(snapshotId int) {
 	tokensSnap := map[string]int{}
 	tokensSnap[server.Id] = server.Tokens
 	snapshotStatus.snapshotState.tokens = tokensSnap
+	snapshotStatus.isMarkerReceivedBackFromServer = server.initIsMarkerReceivedBackFromServer()
 	server.snapshotsMap.Store(snapshotId, &snapshotStatus)
 
 	marker := MarkerMessage{}
@@ -163,4 +208,46 @@ func (server *Server) getNumOfOnGoingSnapshots() int {
 	server.numOfOnGoingSnapshotsMutex.RLock()
 	defer server.numOfOnGoingSnapshotsMutex.RUnlock()
 	return server.numOfOnGoingSnapshots
+}
+
+/*
+Returns false if snapshot is already started,
+if not then, this method creates an entry in the snapshotsMap to mark its starting, and returns true
+*/
+func (server *Server) startSnapshotOnlyIfNotAlreadyStarted(snapshotId int) bool {
+
+	_, ok := server.snapshotsMap.Load(snapshotId)
+	if ok {
+		return false
+	}
+	server.startSnapShotMutex.Lock()
+	{
+		// double check if snapshot already started; first check is to avoid locking and checking
+		_, ok := server.snapshotsMap.Load(snapshotId)
+		if ok {
+			server.startSnapShotMutex.Unlock()
+			return false
+		}
+
+		// store the empty snapshot first to avoid starting same snapshotId again
+		server.snapshotsMap.Store(snapshotId, &SnapshotStatus{})
+	}
+	server.startSnapShotMutex.Unlock()
+	return true
+}
+
+// creates marker response tracker with all values as false.
+// These values will be marked true when marker is received the second time
+func (server *Server) initIsMarkerReceivedBackFromServer() map[string]bool {
+	isMarkerReceivedBackFromServer := make(map[string]bool)
+	for _, serverId := range getSortedKeys(server.inboundLinks) {
+		isMarkerReceivedBackFromServer[serverId] = false
+	}
+	return isMarkerReceivedBackFromServer
+}
+
+func (server *Server) collectSnapshotState(snapshotId int) SnapshotState {
+	_snapshotStatus, _ := server.snapshotsMap.Load(snapshotId)
+	snapshotStatus := _snapshotStatus.(SnapshotStatus)
+	return snapshotStatus.snapshotState
 }
