@@ -1,6 +1,7 @@
 package chandy_lamport
 
 import (
+	"fmt"
 	"log"
 	"sync"
 )
@@ -26,9 +27,10 @@ type Server struct {
 }
 
 type SnapshotStatus struct {
-	isOngoing                      bool
-	snapshotState                  SnapshotState
-	isMarkerReceivedBackFromServer map[string]bool // K,V -> neighbourServerId, boolean that says whether marker was returned from that server
+	isOngoing     bool
+	snapshotState SnapshotState
+	//isMarkerReceivedBackFromServer map[string]bool // K,V -> neighbourServerId, boolean that says whether marker was returned from that server
+	inboundMarkerResponseWaitGroup sync.WaitGroup
 }
 
 // A unidirectional communication channel between two servers
@@ -109,15 +111,16 @@ func (server *Server) HandlePacket(src string, message interface{}) {
 		write switch cases on message type
 	*/
 
-	switch _ := message.(type) {
+	switch message.(type) {
 	case TokenMessage:
-
+		fmt.Println("[server " + server.Id + "]  HandlePacket got Token " + string(rune(message.(TokenMessage).numTokens)))
 		// Basic Token update (independent of chandy-lamport algo)
 		// This update should not be affected by our snapshotting code
 		server.Tokens += message.(TokenMessage).numTokens
 
 		// if no ongoing snapshots -> do nothing further
 		numOfOnGoingSnapshots := server.getNumOfOnGoingSnapshots()
+		fmt.Println("[server " + server.Id + "]  HandlePacket : ongoing snapshots:" + string(rune(numOfOnGoingSnapshots)))
 		if numOfOnGoingSnapshots == 0 {
 			// nothing to handle
 			return
@@ -127,7 +130,8 @@ func (server *Server) HandlePacket(src string, message interface{}) {
 		server.snapshotsMap.Range(func(snapshotId, _snapshotStatus interface{}) bool {
 
 			snapshotStatus := _snapshotStatus.(*SnapshotStatus)
-			if snapshotStatus.isOngoing && !snapshotStatus.isMarkerReceivedBackFromServer[src] {
+			if snapshotStatus.isOngoing {
+				fmt.Println("[server " + server.Id + "]  HandlePacket : Tracking token in [" + src + "-" + server.Id + "]")
 				token := SnapshotMessage{
 					src:     src,
 					dest:    server.Id,
@@ -137,36 +141,34 @@ func (server *Server) HandlePacket(src string, message interface{}) {
 			}
 			return true // Range method expects a true; otherwise it stops iterating further.
 		})
-
 		break
 
 	case MarkerMessage:
+		fmt.Println("[server " + server.Id + "]  HandlePacket got Marker from " + src)
 		snapshotId := message.(MarkerMessage).snapshotId
 
 		snapshotAlreadyStarted := !server.startSnapshotOnlyIfNotAlreadyStarted(snapshotId)
 		if snapshotAlreadyStarted {
+			fmt.Println("[server " + server.Id + "]  HandlePacket snapshot already started")
 
+			// mark done from this inbound channel
 			_snapshotStatus, _ := server.snapshotsMap.Load(snapshotId)
 			snapshotStatus := _snapshotStatus.(*SnapshotStatus)
-			snapshotStatus.isMarkerReceivedBackFromServer[src] = true
-
-			// check if marker is received from all inbound channels
-			for _, isMarkerReceived := range snapshotStatus.isMarkerReceivedBackFromServer {
-				if !isMarkerReceived {
-					// not all markers have been received yet from inbound channels
-					break
-				}
-			}
-			// all markers received from inbound channels -> snapshot complete for this server
-			snapshotStatus.isOngoing = false
-			server.addToNumOfOnGoingSnapshots(-1)
-
-			// notify this event to the simulator
-			go server.sim.NotifySnapshotComplete(server.Id, snapshotId)
+			snapshotStatus.inboundMarkerResponseWaitGroup.Done()
 
 		} else {
 			// This is the first time, the marker has arrived.
-			go server.StartSnapshot(snapshotId)
+			fmt.Println("[server " + server.Id + "]  HandlePacket snapshot not already started, starting now")
+			go func() {
+
+				server.StartSnapshot(snapshotId)
+
+				// Marking the marker sender inbound channel (which sent the first marker to this server) true
+				_snapshotStatus, _ := server.snapshotsMap.Load(snapshotId)
+				snapshotStatus := _snapshotStatus.(*SnapshotStatus)
+				snapshotStatus.inboundMarkerResponseWaitGroup.Done() // mark done for this inbound channel
+			}()
+
 		}
 		break
 	}
@@ -176,6 +178,7 @@ func (server *Server) HandlePacket(src string, message interface{}) {
 // Start the chandy-lamport snapshot algorithm on this server.
 // This should be called only once per server.
 func (server *Server) StartSnapshot(snapshotId int) {
+	fmt.Println("[server " + server.Id + "]  startSnapshot")
 	// TODO: IMPLEMENT ME
 
 	/**
@@ -190,12 +193,29 @@ func (server *Server) StartSnapshot(snapshotId int) {
 	tokensSnap := map[string]int{}
 	tokensSnap[server.Id] = server.Tokens
 	snapshotStatus.snapshotState.tokens = tokensSnap
-	snapshotStatus.isMarkerReceivedBackFromServer = server.initIsMarkerReceivedBackFromServer()
+	snapshotStatus.inboundMarkerResponseWaitGroup.Add(len(server.inboundLinks))
 	server.snapshotsMap.Store(snapshotId, &snapshotStatus)
 
 	marker := MarkerMessage{}
 	marker.snapshotId = snapshotId
-	go server.SendToNeighbors(marker) //TODO: need to confirm if go routine is needed here
+	go func() {
+		server.SendToNeighbors(marker)
+		server.notifySnapshotComplete(snapshotId)
+	}()
+}
+
+func (server *Server) notifySnapshotComplete(snapshotId int) {
+	fmt.Println("[server " + server.Id + "]  notifySnapshotComplete: waiting for all markers")
+	_snapshotStatus, _ := server.snapshotsMap.Load(snapshotId)
+	snapshotStatus := _snapshotStatus.(*SnapshotStatus)
+	snapshotStatus.inboundMarkerResponseWaitGroup.Wait()
+
+	// all markers received from inbound channels -> snapshot complete for this server
+	fmt.Println("[server " + server.Id + "]  notifySnapshotComplete: all markers have been received from inbound channels. Notifying...")
+	snapshotStatus.isOngoing = false
+	server.addToNumOfOnGoingSnapshots(-1)
+	// notify this event to the simulator
+	go server.sim.NotifySnapshotComplete(server.Id, snapshotId)
 }
 
 func (server *Server) addToNumOfOnGoingSnapshots(numToAdd int) {
@@ -215,11 +235,13 @@ Returns false if snapshot is already started,
 if not then, this method creates an entry in the snapshotsMap to mark its starting, and returns true
 */
 func (server *Server) startSnapshotOnlyIfNotAlreadyStarted(snapshotId int) bool {
-
+	fmt.Println("[server " + server.Id + "]  startSnapshotOnlyIfNotAlreadyStarted")
 	_, ok := server.snapshotsMap.Load(snapshotId)
 	if ok {
+		fmt.Println("[server " + server.Id + "]  startSnapshotOnlyIfNotAlreadyStarted returning false")
 		return false
 	}
+	fmt.Println("[server " + server.Id + "]  creating SnapshotStatus")
 	server.startSnapShotMutex.Lock()
 	{
 		// double check if snapshot already started; first check is to avoid locking and checking
@@ -247,7 +269,8 @@ func (server *Server) initIsMarkerReceivedBackFromServer() map[string]bool {
 }
 
 func (server *Server) collectSnapshotState(snapshotId int) SnapshotState {
+	fmt.Println("[server " + server.Id + "]  collectSnapshotState")
 	_snapshotStatus, _ := server.snapshotsMap.Load(snapshotId)
-	snapshotStatus := _snapshotStatus.(SnapshotStatus)
+	snapshotStatus := _snapshotStatus.(*SnapshotStatus)
 	return snapshotStatus.snapshotState
 }

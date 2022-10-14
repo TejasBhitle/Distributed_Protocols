@@ -1,6 +1,7 @@
 package chandy_lamport
 
 import (
+	"fmt"
 	"log"
 	"math/rand"
 	"sync"
@@ -26,7 +27,7 @@ type Simulator struct {
 	logger         *Logger
 	// TODO: ADD MORE FIELDS HERE
 
-	snapshotsCountMap sync.Map // K,V -> snapshotId, mapOfResponses
+	snapshotCompleteWaitGroup sync.WaitGroup
 }
 
 func NewSimulator() *Simulator {
@@ -35,7 +36,7 @@ func NewSimulator() *Simulator {
 		0,
 		make(map[string]*Server),
 		NewLogger(),
-		sync.Map{},
+		sync.WaitGroup{},
 	}
 }
 
@@ -108,6 +109,7 @@ func (sim *Simulator) Tick() {
 
 // Start a new snapshot process at the specified server
 func (sim *Simulator) StartSnapshot(serverId string) {
+	fmt.Println("[sim]  StartSnapshot")
 	snapshotId := sim.nextSnapshotId
 	sim.nextSnapshotId++
 	sim.logger.RecordEvent(sim.servers[serverId], StartSnapshot{serverId, snapshotId})
@@ -116,18 +118,19 @@ func (sim *Simulator) StartSnapshot(serverId string) {
 	/*
 		1. send the ss marker to serverId (Call -> StartSnapshot)
 	*/
-	_, ok := sim.snapshotsCountMap.Load(snapshotId)
-	if ok {
-		// sim should not start the same snapshot again.
-		return
-	}
-	mapOfResponses := make(map[string]bool)
-	for serverId, _ := range sim.servers {
-		mapOfResponses[serverId] = false
-	}
-	sim.snapshotsCountMap.Store(snapshotId, mapOfResponses)
-	sim.servers[serverId].StartSnapshot(snapshotId)
+	//_, ok := sim.snapshotsCountMap.Load(snapshotId)
+	//if ok {
+	//	// sim should not start the same snapshot again.
+	//	return
+	//}
+	//mapOfResponses := make(map[string]bool)
+	//for serverId, _ := range sim.servers {
+	//	mapOfResponses[serverId] = false
+	//}
+	//sim.snapshotsCountMap.Store(snapshotId, mapOfResponses)
 
+	sim.snapshotCompleteWaitGroup.Add(len(sim.servers))
+	go sim.servers[serverId].StartSnapshot(snapshotId)
 }
 
 // Callback for servers to notify the simulator that the snapshot process has
@@ -136,23 +139,29 @@ func (sim *Simulator) NotifySnapshotComplete(serverId string, snapshotId int) {
 	sim.logger.RecordEvent(sim.servers[serverId], EndSnapshot{serverId, snapshotId})
 	// TODO: IMPLEMENT ME
 
-	_mapOfResponses, _ := sim.snapshotsCountMap.Load(snapshotId)
-	mapOfResponses := _mapOfResponses.(map[string]bool)
-	mapOfResponses[serverId] = true
-	sim.snapshotsCountMap.Store(snapshotId, mapOfResponses)
-
-	for _, response := range mapOfResponses {
-		if !response {
-			break
-		}
-	}
-	sim.CollectSnapshot(snapshotId)
+	//_mapOfResponses, _ := sim.snapshotsCountMap.Load(snapshotId)
+	//mapOfResponses := _mapOfResponses.(map[string]bool)
+	//mapOfResponses[serverId] = true
+	//sim.snapshotsCountMap.Store(snapshotId, mapOfResponses)
+	//
+	//for _, response := range mapOfResponses {
+	//	if !response {
+	//		break
+	//	}
+	//}
+	//sim.CollectSnapshot(snapshotId)
+	fmt.Println("[sim]  NotifySnapshotComplete received from [" + serverId + "] [" + string(rune(snapshotId)) + "]")
+	sim.snapshotCompleteWaitGroup.Done()
 
 }
 
 // Collect and merge snapshot state from all the servers.
 // This function blocks until the snapshot process has completed on all servers.
 func (sim *Simulator) CollectSnapshot(snapshotId int) *SnapshotState {
+	fmt.Println("[sim]  CollectSnapshot waiting")
+	sim.snapshotCompleteWaitGroup.Wait()
+	fmt.Println("[sim]  CollectSnapshot wait over")
+
 	snap := SnapshotState{snapshotId, make(map[string]int), make([]*SnapshotMessage, 0)}
 	// TODO: IMPLEMENT ME
 
