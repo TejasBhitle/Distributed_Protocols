@@ -115,20 +115,6 @@ func (sim *Simulator) StartSnapshot(serverId string) {
 	sim.logger.RecordEvent(sim.servers[serverId], StartSnapshot{serverId, snapshotId})
 	// TODO: IMPLEMENT ME
 
-	/*
-		1. send the ss marker to serverId (Call -> StartSnapshot)
-	*/
-	//_, ok := sim.snapshotsCountMap.Load(snapshotId)
-	//if ok {
-	//	// sim should not start the same snapshot again.
-	//	return
-	//}
-	//mapOfResponses := make(map[string]bool)
-	//for serverId, _ := range sim.servers {
-	//	mapOfResponses[serverId] = false
-	//}
-	//sim.snapshotsCountMap.Store(snapshotId, mapOfResponses)
-
 	sim.snapshotCompleteWaitGroup.Add(len(sim.servers))
 	go sim.servers[serverId].StartSnapshot(snapshotId)
 }
@@ -139,18 +125,7 @@ func (sim *Simulator) NotifySnapshotComplete(serverId string, snapshotId int) {
 	sim.logger.RecordEvent(sim.servers[serverId], EndSnapshot{serverId, snapshotId})
 	// TODO: IMPLEMENT ME
 
-	//_mapOfResponses, _ := sim.snapshotsCountMap.Load(snapshotId)
-	//mapOfResponses := _mapOfResponses.(map[string]bool)
-	//mapOfResponses[serverId] = true
-	//sim.snapshotsCountMap.Store(snapshotId, mapOfResponses)
-	//
-	//for _, response := range mapOfResponses {
-	//	if !response {
-	//		break
-	//	}
-	//}
-	//sim.CollectSnapshot(snapshotId)
-	fmt.Println("[sim]  NotifySnapshotComplete received from [" + serverId + "] [" + string(rune(snapshotId)) + "]")
+	fmt.Println("[sim]  NotifySnapshotComplete received from ["+serverId+"] ", snapshotId)
 	sim.snapshotCompleteWaitGroup.Done()
 
 }
@@ -165,8 +140,9 @@ func (sim *Simulator) CollectSnapshot(snapshotId int) *SnapshotState {
 	snap := SnapshotState{snapshotId, make(map[string]int), make([]*SnapshotMessage, 0)}
 	// TODO: IMPLEMENT ME
 
-	for _, server := range sim.servers {
-		snapshotState := server.collectSnapshotState(snapshotId)
+	for _, serverId := range getSortedKeys(sim.servers) {
+
+		snapshotState := sim.servers[serverId].collectSnapshotState(snapshotId)
 
 		for key, value := range snapshotState.tokens {
 			snap.tokens[key] = value

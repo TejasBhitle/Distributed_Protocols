@@ -19,8 +19,8 @@ type Server struct {
 	inboundLinks  map[string]*Link // key = link.src
 	// TODO: ADD MORE FIELDS HERE
 
-	snapshotsMap       sync.Map   // K,V -> snapshotId, *SnapshotStatus (because of multiple snapshots)
-	startSnapShotMutex sync.Mutex // to make startSnapShot() thread safe
+	snapshotsMap sync.Map // K,V -> snapshotId, *SnapshotStatus (because of multiple snapshots)
+	//startSnapShotMutex sync.Mutex // to make startSnapShot() thread safe
 
 	numOfOnGoingSnapshots      int // Access this using the below sync methods only
 	numOfOnGoingSnapshotsMutex sync.RWMutex
@@ -49,7 +49,7 @@ func NewServer(id string, tokens int, sim *Simulator) *Server {
 		make(map[string]*Link),
 		make(map[string]*Link),
 		sync.Map{},
-		sync.Mutex{},
+		//sync.Mutex{},
 		0,
 		sync.RWMutex{},
 	}
@@ -113,14 +113,14 @@ func (server *Server) HandlePacket(src string, message interface{}) {
 
 	switch message.(type) {
 	case TokenMessage:
-		fmt.Println("[server " + server.Id + "]  HandlePacket got Token " + string(rune(message.(TokenMessage).numTokens)))
+		fmt.Println("[server "+server.Id+"]  HandlePacket got Token %d", message.(TokenMessage).numTokens)
 		// Basic Token update (independent of chandy-lamport algo)
 		// This update should not be affected by our snapshotting code
 		server.Tokens += message.(TokenMessage).numTokens
 
 		// if no ongoing snapshots -> do nothing further
 		numOfOnGoingSnapshots := server.getNumOfOnGoingSnapshots()
-		fmt.Println("[server " + server.Id + "]  HandlePacket : ongoing snapshots:" + string(rune(numOfOnGoingSnapshots)))
+		fmt.Println("[server "+server.Id+"]  HandlePacket : ongoing snapshots: %d", numOfOnGoingSnapshots)
 		if numOfOnGoingSnapshots == 0 {
 			// nothing to handle
 			return
@@ -132,12 +132,12 @@ func (server *Server) HandlePacket(src string, message interface{}) {
 			snapshotStatus := _snapshotStatus.(*SnapshotStatus)
 			if snapshotStatus.isOngoing {
 				fmt.Println("[server " + server.Id + "]  HandlePacket : Tracking token in [" + src + "-" + server.Id + "]")
-				token := SnapshotMessage{
+				snapshotMsg := SnapshotMessage{
 					src:     src,
 					dest:    server.Id,
 					message: message,
 				}
-				snapshotStatus.snapshotState.messages = append(snapshotStatus.snapshotState.messages, &token)
+				snapshotStatus.snapshotState.messages = append(snapshotStatus.snapshotState.messages, &snapshotMsg)
 			}
 			return true // Range method expects a true; otherwise it stops iterating further.
 		})
@@ -159,18 +159,18 @@ func (server *Server) HandlePacket(src string, message interface{}) {
 		} else {
 			// This is the first time, the marker has arrived.
 			fmt.Println("[server " + server.Id + "]  HandlePacket snapshot not already started, starting now")
-			go func() {
+			server.StartSnapshot(snapshotId)
 
-				server.StartSnapshot(snapshotId)
-
-				// Marking the marker sender inbound channel (which sent the first marker to this server) true
-				_snapshotStatus, _ := server.snapshotsMap.Load(snapshotId)
-				snapshotStatus := _snapshotStatus.(*SnapshotStatus)
-				snapshotStatus.inboundMarkerResponseWaitGroup.Done() // mark done for this inbound channel
-			}()
+			// Marking the marker sender inbound channel (which sent the first marker to this server) true
+			_snapshotStatus, _ := server.snapshotsMap.Load(snapshotId)
+			snapshotStatus := _snapshotStatus.(*SnapshotStatus)
+			snapshotStatus.inboundMarkerResponseWaitGroup.Done() // mark done for this inbound channel
 
 		}
 		break
+	default:
+		fmt.Println("[server " + server.Id + "]  Uknown msg type received")
+
 	}
 
 }
@@ -242,35 +242,41 @@ func (server *Server) startSnapshotOnlyIfNotAlreadyStarted(snapshotId int) bool 
 		return false
 	}
 	fmt.Println("[server " + server.Id + "]  creating SnapshotStatus")
-	server.startSnapShotMutex.Lock()
-	{
-		// double check if snapshot already started; first check is to avoid locking and checking
-		_, ok := server.snapshotsMap.Load(snapshotId)
-		if ok {
-			server.startSnapShotMutex.Unlock()
-			return false
-		}
-
-		// store the empty snapshot first to avoid starting same snapshotId again
-		server.snapshotsMap.Store(snapshotId, &SnapshotStatus{})
-	}
-	server.startSnapShotMutex.Unlock()
+	//server.startSnapShotMutex.Lock()
+	//{
+	//	// double check if snapshot already started; first check is to avoid locking and checking
+	//	_, ok := server.snapshotsMap.Load(snapshotId)
+	//	if ok {
+	//		//server.startSnapShotMutex.Unlock()
+	//		return false
+	//	}
+	//
+	//	// store the empty snapshot first to avoid starting same snapshotId again
+	//	server.snapshotsMap.Store(snapshotId, &SnapshotStatus{})
+	//}
+	//server.startSnapShotMutex.Unlock()
 	return true
 }
 
 // creates marker response tracker with all values as false.
 // These values will be marked true when marker is received the second time
-func (server *Server) initIsMarkerReceivedBackFromServer() map[string]bool {
-	isMarkerReceivedBackFromServer := make(map[string]bool)
-	for _, serverId := range getSortedKeys(server.inboundLinks) {
-		isMarkerReceivedBackFromServer[serverId] = false
-	}
-	return isMarkerReceivedBackFromServer
-}
+//func (server *Server) initIsMarkerReceivedBackFromServer() map[string]bool {
+//	isMarkerReceivedBackFromServer := make(map[string]bool)
+//	for _, serverId := range getSortedKeys(server.inboundLinks) {
+//		isMarkerReceivedBackFromServer[serverId] = false
+//	}
+//	return isMarkerReceivedBackFromServer
+//}
 
 func (server *Server) collectSnapshotState(snapshotId int) SnapshotState {
 	fmt.Println("[server " + server.Id + "]  collectSnapshotState")
 	_snapshotStatus, _ := server.snapshotsMap.Load(snapshotId)
 	snapshotStatus := _snapshotStatus.(*SnapshotStatus)
+
+	fmt.Println("====================" + server.Id + "===========================")
+	fmt.Println(snapshotStatus.snapshotState.tokens)
+	fmt.Println(snapshotStatus.snapshotState.messages)
+	fmt.Println("===============================================")
+
 	return snapshotStatus.snapshotState
 }
