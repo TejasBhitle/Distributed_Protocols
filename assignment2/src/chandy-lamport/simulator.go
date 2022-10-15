@@ -116,7 +116,7 @@ func (sim *Simulator) StartSnapshot(serverId string) {
 	// TODO: IMPLEMENT ME
 
 	sim.snapshotCompleteWaitGroup.Add(len(sim.servers))
-	go sim.servers[serverId].StartSnapshot(snapshotId)
+	sim.servers[serverId].StartSnapshot(snapshotId)
 }
 
 // Callback for servers to notify the simulator that the snapshot process has
