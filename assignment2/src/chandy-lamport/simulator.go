@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"sync"
 )
 
 // Max random delay added to packet delivery
@@ -27,7 +26,8 @@ type Simulator struct {
 	logger         *Logger
 	// TODO: ADD MORE FIELDS HERE
 
-	snapshotCompleteWaitGroup sync.WaitGroup
+	//snapshotCompleteWaitGroup sync.WaitGroup
+	snapshotCompleteChannel map[int]chan bool
 }
 
 func NewSimulator() *Simulator {
@@ -36,7 +36,7 @@ func NewSimulator() *Simulator {
 		0,
 		make(map[string]*Server),
 		NewLogger(),
-		sync.WaitGroup{},
+		make(map[int]chan bool),
 	}
 }
 
@@ -109,13 +109,15 @@ func (sim *Simulator) Tick() {
 
 // Start a new snapshot process at the specified server
 func (sim *Simulator) StartSnapshot(serverId string) {
-	fmt.Println("[sim]  StartSnapshot")
+
+	fmt.Println("][sim]  StartSnapshot")
 	snapshotId := sim.nextSnapshotId
 	sim.nextSnapshotId++
 	sim.logger.RecordEvent(sim.servers[serverId], StartSnapshot{serverId, snapshotId})
 	// TODO: IMPLEMENT ME
 
-	sim.snapshotCompleteWaitGroup.Add(len(sim.servers))
+	//sim.snapshotCompleteWaitGroup.Add(len(sim.servers))
+	sim.snapshotCompleteChannel[snapshotId] = make(chan bool, len(sim.servers))
 	sim.servers[serverId].StartSnapshot(snapshotId)
 }
 
@@ -126,7 +128,7 @@ func (sim *Simulator) NotifySnapshotComplete(serverId string, snapshotId int) {
 	// TODO: IMPLEMENT ME
 
 	fmt.Println("[sim]  NotifySnapshotComplete received from ["+serverId+"] ", snapshotId)
-	sim.snapshotCompleteWaitGroup.Done()
+	sim.snapshotCompleteChannel[snapshotId] <- true
 
 }
 
@@ -134,7 +136,12 @@ func (sim *Simulator) NotifySnapshotComplete(serverId string, snapshotId int) {
 // This function blocks until the snapshot process has completed on all servers.
 func (sim *Simulator) CollectSnapshot(snapshotId int) *SnapshotState {
 	fmt.Println("[sim]  CollectSnapshot waiting")
-	sim.snapshotCompleteWaitGroup.Wait()
+
+	for i := 0; i < len(sim.servers); i++ {
+		x := <-sim.snapshotCompleteChannel[snapshotId]
+		x = !x // dummy operation to use x
+	}
+
 	fmt.Println("[sim]  CollectSnapshot wait over")
 
 	snap := SnapshotState{snapshotId, make(map[string]int), make([]*SnapshotMessage, 0)}
