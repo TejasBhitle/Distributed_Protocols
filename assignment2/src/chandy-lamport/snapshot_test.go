@@ -65,7 +65,7 @@ func Test8NodesSequentialSnapshots(t *testing.T) {
 	runTest(
 		t,
 		"8nodes.top",
-		"8nodes-sequential-snapshotsMap.events",
+		"8nodes-sequential-snapshots.events",
 		[]string{
 			"8nodes-sequential-snapshots0.snap",
 			"8nodes-sequential-snapshots1.snap",
@@ -76,7 +76,7 @@ func Test8NodesConcurrentSnapshots(t *testing.T) {
 	runTest(
 		t,
 		"8nodes.top",
-		"8nodes-concurrent-snapshotsMap.events",
+		"8nodes-concurrent-snapshots.events",
 		[]string{
 			"8nodes-concurrent-snapshots0.snap",
 			"8nodes-concurrent-snapshots1.snap",

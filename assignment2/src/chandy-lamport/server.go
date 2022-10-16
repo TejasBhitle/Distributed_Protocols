@@ -22,14 +22,14 @@ type Server struct {
 	snapshotsMap sync.Map // K,V -> snapshotId, *SnapshotStatus (because of multiple snapshots)
 	//startSnapShotMutex sync.Mutex // to make startSnapShot() thread safe
 
-	numOfOnGoingSnapshots      int // Access this using the below sync methods only
-	numOfOnGoingSnapshotsMutex sync.RWMutex
+	//numOfOnGoingSnapshots      int // Access this using the below sync methods only
+	//numOfOnGoingSnapshotsMutex sync.RWMutex
 }
 
 type SnapshotStatus struct {
-	isOngoing     bool
-	snapshotState SnapshotState
-	//isMarkerReceivedBackFromServer map[string]bool // K,V -> neighbourServerId, boolean that says whether marker was returned from that server
+	isOngoing                      bool
+	snapshotState                  SnapshotState
+	isMarkerReceivedBackFromServer map[string]bool // K,V -> neighbourServerId, boolean that says whether marker was returned from that server
 	//inboundMarkerResponseWaitGroup sync.WaitGroup
 	markerReceivedCount int
 }
@@ -51,8 +51,8 @@ func NewServer(id string, tokens int, sim *Simulator) *Server {
 		make(map[string]*Link),
 		sync.Map{},
 		//sync.Mutex{},
-		0,
-		sync.RWMutex{},
+		//0,
+		//sync.RWMutex{},
 	}
 }
 
@@ -122,18 +122,18 @@ func (server *Server) HandlePacket(src string, message interface{}) {
 		server.Tokens += message.(TokenMessage).numTokens
 
 		// if no ongoing snapshots -> do nothing further
-		numOfOnGoingSnapshots := server.getNumOfOnGoingSnapshots()
-		fmt.Printf("[server %s]  HandlePacket : ongoing snapshots: %d = %v\n", server.Id, numOfOnGoingSnapshots, server.snapshotsMap)
-		if numOfOnGoingSnapshots == 0 {
-			// nothing to handle
-			return
-		}
+		//numOfOnGoingSnapshots := server.getNumOfOnGoingSnapshots()
+		//fmt.Printf("[server %s]  HandlePacket : ongoing snapshots: %d = %v\n", server.Id, numOfOnGoingSnapshots, server.snapshotsMap)
+		//if numOfOnGoingSnapshots == 0 {
+		//	// nothing to handle
+		//	return
+		//}
 
 		// forEach ongoing snapshots -> add the incoming token as tracked token from that inbound channel
 		server.snapshotsMap.Range(func(snapshotId, _snapshotStatus interface{}) bool {
 
 			snapshotStatus := _snapshotStatus.(*SnapshotStatus)
-			if snapshotStatus.isOngoing {
+			if snapshotStatus.isOngoing && !snapshotStatus.isMarkerReceivedBackFromServer[src] {
 				fmt.Printf("[server %s]  HandlePacket : Tracking %v\n", server.Id, server.snapshotsMap)
 				snapshotMsg := SnapshotMessage{
 					src:     src,
@@ -163,12 +163,13 @@ func (server *Server) HandlePacket(src string, message interface{}) {
 		_snapshotStatus, _ := server.snapshotsMap.Load(snapshotId)
 		snapshotStatus := _snapshotStatus.(*SnapshotStatus)
 		snapshotStatus.markerReceivedCount++
+		snapshotStatus.isMarkerReceivedBackFromServer[src] = true
 
 		if snapshotStatus.markerReceivedCount == len(server.inboundLinks) {
 			// all markers received from inbound channels -> snapshot complete for this server
 			fmt.Println("[server " + server.Id + "]  notifySnapshotComplete: all markers have been received from inbound channels. Notifying...")
 			snapshotStatus.isOngoing = false
-			server.addToNumOfOnGoingSnapshots(-1)
+			//server.addToNumOfOnGoingSnapshots(-1)
 			// notify this event to the simulator
 			server.sim.NotifySnapshotComplete(server.Id, snapshotId)
 		}
@@ -193,12 +194,16 @@ func (server *Server) StartSnapshot(snapshotId int) {
 	*/
 	snapshotStatus := SnapshotStatus{}
 	snapshotStatus.isOngoing = true
-	server.addToNumOfOnGoingSnapshots(1)
+	//server.addToNumOfOnGoingSnapshots(1)
 
 	tokensSnap := map[string]int{}
 	tokensSnap[server.Id] = server.Tokens
 	snapshotStatus.snapshotState.tokens = tokensSnap
 	snapshotStatus.markerReceivedCount = 0
+	snapshotStatus.isMarkerReceivedBackFromServer = map[string]bool{}
+	for _, server := range getSortedKeys(server.inboundLinks) {
+		snapshotStatus.isMarkerReceivedBackFromServer[server] = false
+	}
 	server.snapshotsMap.Store(snapshotId, &snapshotStatus)
 
 	marker := MarkerMessage{}
@@ -219,17 +224,17 @@ func (server *Server) StartSnapshot(snapshotId int) {
 //
 //}
 
-func (server *Server) addToNumOfOnGoingSnapshots(numToAdd int) {
-	server.numOfOnGoingSnapshotsMutex.Lock()
-	defer server.numOfOnGoingSnapshotsMutex.Unlock()
-	server.numOfOnGoingSnapshots += numToAdd
-}
-
-func (server *Server) getNumOfOnGoingSnapshots() int {
-	server.numOfOnGoingSnapshotsMutex.RLock()
-	defer server.numOfOnGoingSnapshotsMutex.RUnlock()
-	return server.numOfOnGoingSnapshots
-}
+//func (server *Server) addToNumOfOnGoingSnapshots(numToAdd int) {
+//	server.numOfOnGoingSnapshotsMutex.Lock()
+//	defer server.numOfOnGoingSnapshotsMutex.Unlock()
+//	server.numOfOnGoingSnapshots += numToAdd
+//}
+//
+//func (server *Server) getNumOfOnGoingSnapshots() int {
+//	server.numOfOnGoingSnapshotsMutex.RLock()
+//	defer server.numOfOnGoingSnapshotsMutex.RUnlock()
+//	return server.numOfOnGoingSnapshots
+//}
 
 /*
 Returns false if snapshot is already started,
