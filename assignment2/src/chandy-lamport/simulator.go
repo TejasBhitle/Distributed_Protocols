@@ -1,7 +1,6 @@
 package chandy_lamport
 
 import (
-	"fmt"
 	"log"
 	"math/rand"
 )
@@ -110,7 +109,7 @@ func (sim *Simulator) Tick() {
 // Start a new snapshot process at the specified server
 func (sim *Simulator) StartSnapshot(serverId string) {
 
-	fmt.Println("][sim]  StartSnapshot")
+	//fmt.Println("[sim]  StartSnapshot")
 	snapshotId := sim.nextSnapshotId
 	sim.nextSnapshotId++
 	sim.logger.RecordEvent(sim.servers[serverId], StartSnapshot{serverId, snapshotId})
@@ -127,7 +126,7 @@ func (sim *Simulator) NotifySnapshotComplete(serverId string, snapshotId int) {
 	sim.logger.RecordEvent(sim.servers[serverId], EndSnapshot{serverId, snapshotId})
 	// TODO: IMPLEMENT ME
 
-	fmt.Println("[sim]  NotifySnapshotComplete received from ["+serverId+"] ", snapshotId)
+	//fmt.Println("[sim]  NotifySnapshotComplete received from ["+serverId+"] ", snapshotId)
 	sim.snapshotCompleteChannel[snapshotId] <- true
 
 }
@@ -135,14 +134,14 @@ func (sim *Simulator) NotifySnapshotComplete(serverId string, snapshotId int) {
 // Collect and merge snapshot state from all the servers.
 // This function blocks until the snapshot process has completed on all servers.
 func (sim *Simulator) CollectSnapshot(snapshotId int) *SnapshotState {
-	fmt.Println("[sim]  CollectSnapshot waiting")
+	//fmt.Println("[sim]  CollectSnapshot waiting")
 
 	for i := 0; i < len(sim.servers); i++ {
 		x := <-sim.snapshotCompleteChannel[snapshotId]
 		x = !x // dummy operation to use x
 	}
 
-	fmt.Println("[sim]  CollectSnapshot wait over")
+	//fmt.Println("[sim]  CollectSnapshot wait over")
 
 	snap := SnapshotState{snapshotId, make(map[string]int), make([]*SnapshotMessage, 0)}
 	// TODO: IMPLEMENT ME

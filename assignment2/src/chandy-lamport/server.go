@@ -115,8 +115,6 @@ func (server *Server) HandlePacket(src string, message interface{}) {
 	switch message.(type) {
 	case TokenMessage:
 
-		//fmt.Println("[server "+server.Id+"]  HandlePacket got Token %d = %v", message.(TokenMessage).numTokens, server.snapshotsMap)
-		fmt.Printf("[Server %s] -> HandlePacket got Token %d = %v\n", server.Id, message.(TokenMessage).numTokens, server.snapshotsMap)
 		// Basic Token update (independent of chandy-lamport algo)
 		// This update should not be affected by our snapshotting code
 		server.Tokens += message.(TokenMessage).numTokens
@@ -134,7 +132,7 @@ func (server *Server) HandlePacket(src string, message interface{}) {
 
 			snapshotStatus := _snapshotStatus.(*SnapshotStatus)
 			if snapshotStatus.isOngoing && !snapshotStatus.isMarkerReceivedBackFromServer[src] {
-				fmt.Printf("[server %s]  HandlePacket : Tracking %v\n", server.Id, server.snapshotsMap)
+				//fmt.Printf("[server %s]  HandlePacket : Tracking %v\n", server.Id, server.snapshotsMap)
 				snapshotMsg := SnapshotMessage{
 					src:     src,
 					dest:    server.Id,
@@ -148,14 +146,14 @@ func (server *Server) HandlePacket(src string, message interface{}) {
 
 	case MarkerMessage:
 
-		fmt.Printf("[server %s]  HandlePacket got Marker from %v %v\n", server.Id, src, server.snapshotsMap)
+		//fmt.Printf("[server %s]  HandlePacket got Marker from %v %v\n", server.Id, src, server.snapshotsMap)
 		snapshotId := message.(MarkerMessage).snapshotId
 
 		snapshotAlreadyStarted := !server.startSnapshotOnlyIfNotAlreadyStarted(snapshotId)
 
 		if !snapshotAlreadyStarted {
 			// This is the first time, the marker has arrived.
-			fmt.Printf("[server  %s ]  HandlePacket starting snapshot  %v\n ", server.Id, server.snapshotsMap)
+			//fmt.Printf("[server  %s ]  HandlePacket starting snapshot  %v\n ", server.Id, server.snapshotsMap)
 			server.StartSnapshot(snapshotId)
 		}
 
@@ -167,7 +165,7 @@ func (server *Server) HandlePacket(src string, message interface{}) {
 
 		if snapshotStatus.markerReceivedCount == len(server.inboundLinks) {
 			// all markers received from inbound channels -> snapshot complete for this server
-			fmt.Println("[server " + server.Id + "]  notifySnapshotComplete: all markers have been received from inbound channels. Notifying...")
+			//fmt.Println("[server " + server.Id + "]  notifySnapshotComplete: all markers have been received from inbound channels. Notifying...")
 			snapshotStatus.isOngoing = false
 			//server.addToNumOfOnGoingSnapshots(-1)
 			// notify this event to the simulator
@@ -184,7 +182,7 @@ func (server *Server) HandlePacket(src string, message interface{}) {
 // Start the chandy-lamport snapshot algorithm on this server.
 // This should be called only once per server.
 func (server *Server) StartSnapshot(snapshotId int) {
-	fmt.Println("[server " + server.Id + "]  startSnapshot")
+	//fmt.Println("[server " + server.Id + "]  startSnapshot")
 	// TODO: IMPLEMENT ME
 
 	/**
@@ -275,20 +273,20 @@ func (server *Server) startSnapshotOnlyIfNotAlreadyStarted(snapshotId int) bool 
 //		return isMarkerReceivedBackFromServer
 //	}
 func (server *Server) collectSnapshotState(snapshotId int) SnapshotState {
-	fmt.Println("[server " + server.Id + "]  collectSnapshotState")
+	//fmt.Println("[server " + server.Id + "]  collectSnapshotState")
 	_snapshotStatus, _ := server.snapshotsMap.Load(snapshotId)
 	snapshotStatus := _snapshotStatus.(*SnapshotStatus)
 
-	fmt.Println("====================" + server.Id + "===========================")
-	fmt.Println(snapshotStatus.snapshotState.tokens)
+	//fmt.Println("====================" + server.Id + "===========================")
+	//fmt.Println(snapshotStatus.snapshotState.tokens)
 
-	msgs := snapshotStatus.snapshotState.messages
-	for _, msg := range msgs {
-		token := msg.message.(TokenMessage).numTokens
-		fmt.Println("("+msg.src+" "+msg.dest+" token", token)
-	}
-
-	fmt.Println("===============================================")
+	//msgs := snapshotStatus.snapshotState.messages
+	//for _, msg := range msgs {
+	//	token := msg.message.(TokenMessage).numTokens
+	//	fmt.Println("("+msg.src+" "+msg.dest+" token", token)
+	//}
+	//
+	//fmt.Println("===============================================")
 
 	return snapshotStatus.snapshotState
 }
