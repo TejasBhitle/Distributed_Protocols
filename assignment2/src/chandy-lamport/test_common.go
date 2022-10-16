@@ -21,11 +21,11 @@ const testDir = "test_data"
 
 // Read the topology from a ".top" file.
 // The expected format of the file is as follows:
-// 	- The first line contains number of servers N (e.g. "2")
-// 	- The next N lines each contains the server ID and the number of tokens on
-// 	  that server, in the form "[serverId] [numTokens]" (e.g. "N1 1")
-// 	- The rest of the lines represent unidirectional links in the form "[src dst]"
-// 	  (e.g. "N1 N2")
+//   - The first line contains number of servers N (e.g. "2")
+//   - The next N lines each contains the server ID and the number of tokens on
+//     that server, in the form "[serverId] [numTokens]" (e.g. "N1 1")
+//   - The rest of the lines represent unidirectional links in the form "[src dst]"
+//     (e.g. "N1 N2")
 func readTopology(fileName string, sim *Simulator) {
 	b, err := ioutil.ReadFile(path.Join(testDir, fileName))
 	checkError(err)
@@ -69,12 +69,13 @@ func readTopology(fileName string, sim *Simulator) {
 
 // Read the events from a ".events" file and inject the events into the simulator.
 // The expected format of the file is as follows:
-// 	- "tick N" indicates N time steps has elapsed (default N = 1)
-// 	- "send N1 N2 1" indicates that N1 sends 1 token to N2
-// 	- "snapshot N2" indicates the beginning of the snapshot process, starting on N2
+//   - "tick N" indicates N time steps has elapsed (default N = 1)
+//   - "send N1 N2 1" indicates that N1 sends 1 token to N2
+//   - "snapshot N2" indicates the beginning of the snapshot process, starting on N2
+//
 // Note that concurrent events are indicated by the lack of ticks between the events.
 // This function waits until all the snapshot processes have terminated before returning
-// the snapshots collected.
+// the snapshotsMap collected.
 func injectEvents(fileName string, sim *Simulator) []*SnapshotState {
 	b, err := ioutil.ReadFile(path.Join(testDir, fileName))
 	checkError(err)
@@ -119,7 +120,7 @@ func injectEvents(fileName string, sim *Simulator) []*SnapshotState {
 		}
 	}
 
-	// Keep ticking until snapshots complete
+	// Keep ticking until snapshotsMap complete
 	for numSnapshots > 0 {
 		select {
 		case snap := <-getSnapshots:
@@ -131,7 +132,7 @@ func injectEvents(fileName string, sim *Simulator) []*SnapshotState {
 	}
 
 	// Keep ticking until we're sure that the last message has been delivered
-	for i := 0; i < maxDelay + 1; i++ {
+	for i := 0; i < maxDelay+1; i++ {
 		sim.Tick()
 	}
 
@@ -140,11 +141,11 @@ func injectEvents(fileName string, sim *Simulator) []*SnapshotState {
 
 // Read the state of snapshot from a ".snap" file.
 // The expected format of the file is as follows:
-// 	- The first line contains the snapshot ID (e.g. "0")
-// 	- The next N lines contains the server ID and the number of tokens on that server,
-// 	  in the form "[serverId] [numTokens]" (e.g. "N1 0"), one line per server
-// 	- The rest of the lines represent messages exchanged between the servers,
-// 	  in the form "[src] [dest] [message]" (e.g. "N1 N2 token(1)")
+//   - The first line contains the snapshot ID (e.g. "0")
+//   - The next N lines contains the server ID and the number of tokens on that server,
+//     in the form "[serverId] [numTokens]" (e.g. "N1 0"), one line per server
+//   - The rest of the lines represent messages exchanged between the servers,
+//     in the form "[src] [dest] [message]" (e.g. "N1 N2 token(1)")
 func readSnapshot(fileName string) *SnapshotState {
 	b, err := ioutil.ReadFile(path.Join(testDir, fileName))
 	checkError(err)

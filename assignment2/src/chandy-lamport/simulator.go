@@ -24,6 +24,9 @@ type Simulator struct {
 	servers        map[string]*Server // key = server ID
 	logger         *Logger
 	// TODO: ADD MORE FIELDS HERE
+
+	//snapshotCompleteWaitGroup sync.WaitGroup
+	snapshotCompleteChannel map[int]chan bool
 }
 
 func NewSimulator() *Simulator {
@@ -32,6 +35,7 @@ func NewSimulator() *Simulator {
 		0,
 		make(map[string]*Server),
 		NewLogger(),
+		make(map[int]chan bool),
 	}
 }
 
@@ -104,10 +108,16 @@ func (sim *Simulator) Tick() {
 
 // Start a new snapshot process at the specified server
 func (sim *Simulator) StartSnapshot(serverId string) {
+
+	//fmt.Println("[sim]  StartSnapshot")
 	snapshotId := sim.nextSnapshotId
 	sim.nextSnapshotId++
 	sim.logger.RecordEvent(sim.servers[serverId], StartSnapshot{serverId, snapshotId})
 	// TODO: IMPLEMENT ME
+
+	//sim.snapshotCompleteWaitGroup.Add(len(sim.servers))
+	sim.snapshotCompleteChannel[snapshotId] = make(chan bool, len(sim.servers))
+	sim.servers[serverId].StartSnapshot(snapshotId)
 }
 
 // Callback for servers to notify the simulator that the snapshot process has
@@ -115,12 +125,39 @@ func (sim *Simulator) StartSnapshot(serverId string) {
 func (sim *Simulator) NotifySnapshotComplete(serverId string, snapshotId int) {
 	sim.logger.RecordEvent(sim.servers[serverId], EndSnapshot{serverId, snapshotId})
 	// TODO: IMPLEMENT ME
+
+	//fmt.Println("[sim]  NotifySnapshotComplete received from ["+serverId+"] ", snapshotId)
+	sim.snapshotCompleteChannel[snapshotId] <- true
+
 }
 
 // Collect and merge snapshot state from all the servers.
 // This function blocks until the snapshot process has completed on all servers.
 func (sim *Simulator) CollectSnapshot(snapshotId int) *SnapshotState {
+	//fmt.Println("[sim]  CollectSnapshot waiting")
+
+	for i := 0; i < len(sim.servers); i++ {
+		x := <-sim.snapshotCompleteChannel[snapshotId]
+		x = !x // dummy operation to use x
+	}
+
+	//fmt.Println("[sim]  CollectSnapshot wait over")
+
 	snap := SnapshotState{snapshotId, make(map[string]int), make([]*SnapshotMessage, 0)}
 	// TODO: IMPLEMENT ME
+
+	for _, serverId := range getSortedKeys(sim.servers) {
+
+		snapshotState := sim.servers[serverId].collectSnapshotState(snapshotId)
+
+		for key, value := range snapshotState.tokens {
+			snap.tokens[key] = value
+		}
+
+		for _, snapshotMsg := range snapshotState.messages {
+			snap.messages = append(snap.messages, snapshotMsg)
+		}
+	}
+
 	return &snap
 }

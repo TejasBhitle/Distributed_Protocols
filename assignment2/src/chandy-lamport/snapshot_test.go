@@ -27,7 +27,7 @@ func runTest(t *testing.T, topFile string, eventsFile string, snapFiles []string
 		sim.logger.PrettyPrint()
 		fmt.Println()
 	}
-	// Verify that the number of tokens are preserved in the snapshots
+	// Verify that the number of tokens are preserved in the snapshotsMap
 	checkTokens(sim, actualSnaps)
 	// Verify against golden files
 	expectedSnaps := make([]*SnapshotState, 0)
