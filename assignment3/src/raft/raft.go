@@ -17,7 +17,11 @@ package raft
 //   in the same server.
 //
 
-import "sync"
+import (
+	"bytes"
+	"encoding/gob"
+	"sync"
+)
 import "a3/labrpc"
 
 // import "bytes"
@@ -44,6 +48,20 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	/* TODO
+	   1. randomized election timeout
+	*/
+
+	/* enum [follower, candidate, leader] */
+	peerRole PeerRole
+
+	/* latest term server has seen (initialized to 0 on first boot, increases monotonically) */
+	currentTerm int
+
+	/* K,V -> term, candidateId */
+	votedForMap map[int]int
+
+	log []LogData
 }
 
 // return currentTerm and whether this server
@@ -53,6 +71,11 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here.
+
+	// TODO: check threadsafety
+	term = rf.currentTerm
+	isleader = rf.peerRole.role == LeaderRole().role
+
 	return term, isleader
 }
 
@@ -68,6 +91,15 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+
+	// TODO : Note that if using gob.encode, encode zero will get the previous value. It’s a feature not a bug.
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedForMap)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 // restore previously persisted state.
@@ -78,6 +110,13 @@ func (rf *Raft) readPersist(data []byte) {
 	// d := gob.NewDecoder(r)
 	// d.Decode(&rf.xxx)
 	// d.Decode(&rf.yyy)
+
+	// TODO : Note that if using gob.encode, encode zero will get the previous value. It’s a feature not a bug.
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&rf.currentTerm)
+	d.Decode(&rf.votedForMap)
+	d.Decode(&rf.log)
 }
 
 // example RequestVote RPC arguments structure.
@@ -115,7 +154,8 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 	return ok
 }
 
-// the service using Raft (e.g. a k/v server) wants to start
+// Start
+// The service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
 // agreement and return immediately. there is no guarantee that this
@@ -129,11 +169,14 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
+	isLeader := false
+
+	term, isLeader = rf.GetState()
 
 	return index, term, isLeader
 }
 
+// Kill
 // the tester calls Kill() when a Raft instance won't
 // be needed again. you are not required to do anything
 // in Kill(), but it might be convenient to (for example)
@@ -142,7 +185,8 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 }
 
-// the service or tester wants to create a Raft server. the ports
+// Make
+// The service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
 // have the same order. persister is a place for this server to
@@ -151,8 +195,11 @@ func (rf *Raft) Kill() {
 // tester or service expects Raft to send ApplyMsg messages.
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
-func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg) *Raft {
+func Make(peers []*labrpc.ClientEnd,
+	me int,
+	persister *Persister,
+	applyCh chan ApplyMsg) *Raft {
+
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
@@ -164,4 +211,21 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	return rf
+}
+
+/* STRUCTS AND ENUMS */
+
+// PeerRole Enum
+type PeerRole struct {
+	role int
+}
+
+func FollowerRole() PeerRole  { return PeerRole{0} }
+func CandidateRole() PeerRole { return PeerRole{1} }
+func LeaderRole() PeerRole    { return PeerRole{2} }
+
+// LogData TODO check if predefined struct needs to be used
+type LogData struct {
+	command interface{} // command for the state machine
+	term    int         // term when the entry was received by the leader
 }
