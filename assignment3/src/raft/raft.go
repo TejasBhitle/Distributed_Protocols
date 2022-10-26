@@ -18,8 +18,8 @@ package raft
 //
 
 import (
-	"bytes"
-	"encoding/gob"
+	"fmt"
+	"math/rand"
 	"sync"
 	"time"
 )
@@ -59,22 +59,23 @@ type Raft struct {
 	votedForMap sync.Map
 
 	/* K,V -> term, (K,V) -> peerId, voteInFavour */
-	receivedVotesCounter map[int](map[int]bool)
+	receivedVotesCounter sync.Map
 
 	/* actual log */
 	log []LogData
 
-	/* send true on this channel to reset the election timeout*/
+	/* send true on this channel to reset the election timeout
+	To be used only when this peer is not a leader */
 	resetElectionTimeoutChan chan bool
 
-	/* send true on this channel to interrupt the heartbeat this leader will send in case there are no log replication requests */
+	/* send true on this channel to interrupt the heartbeat this leader will send in case there are no log replication requests
+	To be used only when this peer is a leader */
 	resetHeartBeatTimeoutChan chan bool
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
 	var term int
 	var isleader bool
 	// Your code here.
@@ -99,13 +100,13 @@ func (rf *Raft) persist() {
 	// rf.persister.SaveRaftState(data)
 
 	// TODO : Note that if using gob.encode, encode zero will get the previous value. It’s a feature not a bug.
-	w := new(bytes.Buffer)
-	e := gob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedForMap)
-	e.Encode(rf.log)
-	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	//w := new(bytes.Buffer)
+	//e := gob.NewEncoder(w)
+	//e.Encode(rf.currentTerm)
+	//e.Encode(rf.votedForMap)
+	//e.Encode(rf.log)
+	//data := w.Bytes()
+	//rf.persister.SaveRaftState(data)
 }
 
 // restore previously persisted state.
@@ -118,17 +119,16 @@ func (rf *Raft) readPersist(data []byte) {
 	// d.Decode(&rf.yyy)
 
 	// TODO : Note that if using gob.encode, encode zero will get the previous value. It’s a feature not a bug.
-	r := bytes.NewBuffer(data)
-	d := gob.NewDecoder(r)
-	d.Decode(&rf.currentTerm)
-	d.Decode(&rf.votedForMap)
-	d.Decode(&rf.log)
+	//r := bytes.NewBuffer(data)
+	//d := gob.NewDecoder(r)
+	//d.Decode(&rf.currentTerm)
+	//d.Decode(&rf.votedForMap)
+	//d.Decode(&rf.log)
 }
 
 // example RequestVote RPC arguments structure.
 type RequestVoteArgs struct {
 	// Your data here.
-
 	RequestingPeerId   int
 	RequestingPeerTerm int
 }
@@ -136,7 +136,6 @@ type RequestVoteArgs struct {
 // example RequestVote RPC reply structure.
 type RequestVoteReply struct {
 	// Your data here.
-
 	VotedInFavour      bool
 	RespondingPeerTerm int
 }
@@ -149,11 +148,15 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	if args.RequestingPeerTerm < rf.currentTerm {
 		// requesting peer is not on the latest term && desires to be leader
 		// dont vote for it
+		fmt.Printf("RequestVote early exit %d %d \n", args.RequestingPeerTerm, rf.currentTerm)
 		voteDecision = false
 
 	} else {
 		votedFor, _ := rf.votedForMap.LoadOrStore(args.RequestingPeerTerm, args.RequestingPeerId)
 		voteDecision = votedFor == args.RequestingPeerId
+		//if !voteDecision {
+		//	fmt.Printf("RequestVote %d %d\n", votedFor, args.RequestingPeerId)
+		//}
 	}
 
 	reply.VotedInFavour = voteDecision
@@ -176,7 +179,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	ok := rf.peers[server].Call("Raft.RequestVote", args, &reply)
 	return ok
 }
 
@@ -236,12 +239,18 @@ func Make(peers []*labrpc.ClientEnd,
 	rf.me = me
 
 	// Your initialization code here.
+	rf.receivedVotesCounter = sync.Map{}
+	rf.votedForMap = sync.Map{}
+	rf.currentTerm = 0
+	rf.log = []LogData{}
+	rf.resetElectionTimeoutChan = make(chan bool)
+	rf.resetHeartBeatTimeoutChan = make(chan bool)
 
 	// just started peer, should be a follower
 	rf.peerRole = FollowerRole()
 
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+	//rf.readPersist(persister.ReadRaftState())
 
 	rf.startElectionTimeoutBackgroundProcess()
 
@@ -249,8 +258,8 @@ func Make(peers []*labrpc.ClientEnd,
 }
 
 func (rf *Raft) startElectionTimeoutBackgroundProcess() {
-
-	timeoutDuration := time.Duration(250) // TODO: randomize this
+	rand.Seed(time.Now().UnixNano())
+	timeoutDuration := time.Duration(randInt(150, 300))
 
 	go func() {
 		// this background loop should run as long as peer is not leader
@@ -285,13 +294,14 @@ func (rf *Raft) tryTakingLeaderRole() {
 	rf.currentTerm++
 
 	// 3. request votes from peers
-	rf.receivedVotesCounter[rf.currentTerm] = map[int]bool{} // initialize empty map
-
 	for index, peer := range rf.peers {
 
 		if index == rf.me {
 			// mark self vote and ignore requesting vote from self
-			rf.receivedVotesCounter[rf.currentTerm][index] = true
+			receivedVotesForTerm_, _ := rf.receivedVotesCounter.LoadOrStore(rf.currentTerm, sync.Map{})
+			receivedVotesForTerm := receivedVotesForTerm_.(sync.Map)
+			receivedVotesForTerm.Store(index, true)
+			rf.receivedVotesCounter.Store(rf.currentTerm, receivedVotesForTerm)
 			continue
 		}
 
@@ -300,10 +310,15 @@ func (rf *Raft) tryTakingLeaderRole() {
 		peer := peer
 		index := index
 		go func() {
-			ok := peer.Call("Raft.RequestVote", &requestVoteArgs, &requestVoteReply)
+			ok := peer.Call("Raft.RequestVote", requestVoteArgs, &requestVoteReply)
 			if ok {
 				// got vote reply
-				rf.receivedVotesCounter[requestVoteReply.RespondingPeerTerm][index] = requestVoteReply.VotedInFavour
+				fmt.Println("tryTakingLeaderRole 2")
+				receivedVotesCounter_, _ := rf.receivedVotesCounter.LoadOrStore(requestVoteReply.RespondingPeerTerm, sync.Map{})
+				receivedVotesCounter := receivedVotesCounter_.(sync.Map)
+				receivedVotesCounter.Store(index, requestVoteReply.VotedInFavour)
+
+				fmt.Printf("tryTakingLeaderRole 2 done %v\n", requestVoteReply.VotedInFavour)
 				if requestVoteReply.VotedInFavour {
 					rf.transitionToLeaderIfSufficientVotes(requestVoteReply.RespondingPeerTerm)
 				}
@@ -326,11 +341,14 @@ func (rf *Raft) transitionToLeaderIfSufficientVotes(respondingPeerTerm int) {
 	requiredVotes := len(rf.peers) / 2 // TODO: check threshold
 	receivedVotes := 0
 
-	for _, ifVotedInFavour := range rf.receivedVotesCounter[respondingPeerTerm] {
-		if ifVotedInFavour {
+	receivedVotesCounter_, _ := rf.receivedVotesCounter.LoadOrStore(respondingPeerTerm, sync.Map{})
+	receivedVotesCounter := receivedVotesCounter_.(sync.Map)
+	receivedVotesCounter.Range(func(key, ifVotedInFavour any) bool {
+		if ifVotedInFavour.(bool) {
 			receivedVotes++
 		}
-	}
+		return true
+	})
 
 	if receivedVotes < requiredVotes {
 		// insufficient votes
@@ -356,14 +374,42 @@ func (rf *Raft) startPeriodicBroadcastBackgroundProcess() {
 			heartBeatChan <- true
 		}(heartBeatChan, heartBeatDuration)
 
+		entryRequestArgs := EntryRequestArgs{rf.me, rf.currentTerm, []LogData{}}
+		entryRequestReply := EntryRequestReply{}
 		select {
 		case <-heartBeatChan:
 
+			for _, peer := range rf.peers {
+				peer := peer
+				go func() {
+					ok := peer.Call("Raft.AppendEntriesRPC", entryRequestArgs, &entryRequestReply)
+					if ok {
+						// got reply
+					}
+				}()
+			}
+
 			break
 		case <-rf.resetHeartBeatTimeoutChan:
+			// called when there is an actual data in log thats to be replicated.
+			// otherwise it sends just heartbeats to the followers
 			break
 		}
 	}
+}
+
+func (rf *Raft) AppendEntriesRPC(args EntryRequestArgs, reply *EntryRequestReply) {
+	// HeartBeat logic
+	go func() {
+		rf.resetElectionTimeoutChan <- true
+	}()
+
+	reply.Term = rf.currentTerm
+	reply.Success = true // TODO: need to change for A4
+}
+
+func randInt(min int, max int) int {
+	return min + rand.Intn(max-min)
 }
 
 /* STRUCTS AND ENUMS */
@@ -381,4 +427,15 @@ func LeaderRole() PeerRole    { return PeerRole{2} }
 type LogData struct {
 	command interface{} // command for the state machine
 	term    int         // term when the entry was received by the leader
+}
+
+type EntryRequestArgs struct {
+	LeaderId   int
+	LeaderTerm int
+	LogEntries []LogData
+}
+
+type EntryRequestReply struct {
+	Term    int
+	Success bool
 }
