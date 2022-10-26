@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"encoding/gob"
 	"sync"
+	"time"
 )
 import "a3/labrpc"
 
@@ -48,10 +49,6 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	/* TODO
-	   1. randomized election timeout
-	*/
-
 	/* enum [follower, candidate, leader] */
 	peerRole PeerRole
 
@@ -59,9 +56,19 @@ type Raft struct {
 	currentTerm int
 
 	/* K,V -> term, candidateId */
-	votedForMap map[int]int
+	votedForMap sync.Map
 
+	/* K,V -> term, (K,V) -> peerId, voteInFavour */
+	receivedVotesCounter map[int](map[int]bool)
+
+	/* actual log */
 	log []LogData
+
+	/* send true on this channel to reset the election timeout*/
+	resetElectionTimeoutChan chan bool
+
+	/* send true on this channel to interrupt the heartbeat this leader will send in case there are no log replication requests */
+	resetHeartBeatTimeoutChan chan bool
 }
 
 // return currentTerm and whether this server
@@ -72,7 +79,6 @@ func (rf *Raft) GetState() (int, bool) {
 	var isleader bool
 	// Your code here.
 
-	// TODO: check threadsafety
 	term = rf.currentTerm
 	isleader = rf.peerRole.role == LeaderRole().role
 
@@ -122,16 +128,36 @@ func (rf *Raft) readPersist(data []byte) {
 // example RequestVote RPC arguments structure.
 type RequestVoteArgs struct {
 	// Your data here.
+
+	RequestingPeerId   int
+	RequestingPeerTerm int
 }
 
 // example RequestVote RPC reply structure.
 type RequestVoteReply struct {
 	// Your data here.
+
+	VotedInFavour      bool
+	RespondingPeerTerm int
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
+
+	var voteDecision bool
+	if args.RequestingPeerTerm < rf.currentTerm {
+		// requesting peer is not on the latest term && desires to be leader
+		// dont vote for it
+		voteDecision = false
+
+	} else {
+		votedFor, _ := rf.votedForMap.LoadOrStore(args.RequestingPeerTerm, args.RequestingPeerId)
+		voteDecision = votedFor == args.RequestingPeerId
+	}
+
+	reply.VotedInFavour = voteDecision
+	reply.RespondingPeerTerm = rf.currentTerm
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -173,6 +199,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	term, isLeader = rf.GetState()
 
+	if isLeader {
+		// TODO: write to log, maintaining the state of each item (commit or tentative)
+	}
+
 	return index, term, isLeader
 }
 
@@ -207,10 +237,133 @@ func Make(peers []*labrpc.ClientEnd,
 
 	// Your initialization code here.
 
+	// just started peer, should be a follower
+	rf.peerRole = FollowerRole()
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	rf.startElectionTimeoutBackgroundProcess()
+
 	return rf
+}
+
+func (rf *Raft) startElectionTimeoutBackgroundProcess() {
+
+	timeoutDuration := time.Duration(250) // TODO: randomize this
+
+	go func() {
+		// this background loop should run as long as peer is not leader
+		for rf.peerRole.role != LeaderRole().role {
+
+			timeoutChan := make(chan bool)
+			go func(timeoutChan chan bool, timeoutDuration time.Duration) {
+				time.Sleep(timeoutDuration)
+				timeoutChan <- true
+			}(timeoutChan, timeoutDuration)
+
+			select {
+			case <-timeoutChan:
+				rf.tryTakingLeaderRole()
+				break
+			case <-rf.resetElectionTimeoutChan:
+				break
+			}
+		}
+
+	}()
+}
+
+func (rf *Raft) tryTakingLeaderRole() {
+
+	// 1. switch to candidate role if not in that role already
+	if rf.peerRole.role != CandidateRole().role {
+		rf.peerRole = CandidateRole()
+	}
+
+	// 2. increment the term
+	rf.currentTerm++
+
+	// 3. request votes from peers
+	rf.receivedVotesCounter[rf.currentTerm] = map[int]bool{} // initialize empty map
+
+	for index, peer := range rf.peers {
+
+		if index == rf.me {
+			// mark self vote and ignore requesting vote from self
+			rf.receivedVotesCounter[rf.currentTerm][index] = true
+			continue
+		}
+
+		requestVoteArgs := RequestVoteArgs{rf.me, rf.currentTerm}
+		requestVoteReply := RequestVoteReply{}
+		peer := peer
+		index := index
+		go func() {
+			ok := peer.Call("Raft.RequestVote", &requestVoteArgs, &requestVoteReply)
+			if ok {
+				// got vote reply
+				rf.receivedVotesCounter[requestVoteReply.RespondingPeerTerm][index] = requestVoteReply.VotedInFavour
+				if requestVoteReply.VotedInFavour {
+					rf.transitionToLeaderIfSufficientVotes(requestVoteReply.RespondingPeerTerm)
+				}
+			}
+		}()
+	}
+}
+
+func (rf *Raft) transitionToLeaderIfSufficientVotes(respondingPeerTerm int) {
+	if rf.peerRole.role == LeaderRole().role {
+		// already a leader
+		return
+	}
+
+	if rf.currentTerm > respondingPeerTerm {
+		// ignore this vote as it was of previous term
+		return
+	}
+
+	requiredVotes := len(rf.peers) / 2 // TODO: check threshold
+	receivedVotes := 0
+
+	for _, ifVotedInFavour := range rf.receivedVotesCounter[respondingPeerTerm] {
+		if ifVotedInFavour {
+			receivedVotes++
+		}
+	}
+
+	if receivedVotes < requiredVotes {
+		// insufficient votes
+		return
+	}
+
+	// Make current peer leader
+	rf.peerRole = LeaderRole()
+	rf.startPeriodicBroadcastBackgroundProcess()
+}
+
+func (rf *Raft) startPeriodicBroadcastBackgroundProcess() {
+
+	// TODO: This duration should be less than election timeout duration
+	heartBeatDuration := time.Duration(100)
+
+	// should run as long as peer is leader
+	for rf.peerRole.role == LeaderRole().role {
+		heartBeatChan := make(chan bool)
+
+		go func(heartBeatChan chan bool, duration time.Duration) {
+			time.Sleep(duration)
+			heartBeatChan <- true
+		}(heartBeatChan, heartBeatDuration)
+
+		select {
+		case <-heartBeatChan:
+
+			break
+		case <-rf.resetHeartBeatTimeoutChan:
+			break
+		}
+	}
 }
 
 /* STRUCTS AND ENUMS */
