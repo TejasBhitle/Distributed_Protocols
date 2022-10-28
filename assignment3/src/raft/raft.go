@@ -80,10 +80,21 @@ func (rf *Raft) GetState() (int, bool) {
 	var isleader bool
 	// Your code here.
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	term = rf.currentTerm
 	isleader = rf.peerRole.role == LeaderRole().role
 
 	return term, isleader
+}
+
+func (rf *Raft) UpdateState(newTerm int, newRole PeerRole) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	rf.currentTerm = newTerm
+	rf.peerRole = newRole
 }
 
 // save Raft's persistent state to stable storage,
@@ -143,26 +154,26 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
-	fmt.Printf("RequestVote [%d %d] \n", args.RequestingPeerTerm, rf.currentTerm)
+
+	currentTerm, _ := rf.GetState()
+	//fmt.Printf("RequestVote [%d %d] \n", args.RequestingPeerTerm, currentTerm)
 
 	var voteDecision bool
-	if args.RequestingPeerTerm < rf.currentTerm {
+	if args.RequestingPeerTerm < currentTerm {
 		// requesting peer is not on the latest term && desires to be leader
 		// dont vote for it
 		voteDecision = false
-		fmt.Printf("RequestVoteA [%d %d] [%d false] \n", args.RequestingPeerTerm, rf.currentTerm, args.RequestingPeerId)
+		//fmt.Printf("RequestVoteA [%d %d] [%d false] \n", args.RequestingPeerTerm, currentTerm, args.RequestingPeerId)
 
 	} else {
 		votedFor, _ := rf.votedForMap.LoadOrStore(args.RequestingPeerTerm, args.RequestingPeerId)
 		voteDecision = votedFor == args.RequestingPeerId
-		fmt.Printf("RequestVoteB [%d %d] [%d %d] \n", args.RequestingPeerTerm, rf.currentTerm, votedFor, args.RequestingPeerId)
-		//if !voteDecision {
-		//	fmt.Printf("RequestVote %d %d\n", votedFor, args.RequestingPeerId)
-		//}
+		//fmt.Printf("RequestVoteB [%d %d] [%d %d] \n", args.RequestingPeerTerm, currentTerm, votedFor, args.RequestingPeerId)
+
 	}
 
 	reply.VotedInFavour = voteDecision
-	reply.RespondingPeerTerm = rf.currentTerm
+	reply.RespondingPeerTerm = currentTerm
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -222,7 +233,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // in Kill(), but it might be convenient to (for example)
 // turn off debug output from this instance.
 func (rf *Raft) Kill() {
-	// Your code here, if desired.
+	// Your code here, if desired.h
 }
 
 // Make
@@ -248,13 +259,12 @@ func Make(peers []*labrpc.ClientEnd,
 	// Your initialization code here.
 	rf.receivedVotesCounter = sync.Map{}
 	rf.votedForMap = sync.Map{}
-	rf.currentTerm = 0
 	rf.log = []LogData{}
 	rf.resetElectionTimeoutChan = make(chan bool)
 	rf.resetHeartBeatTimeoutChan = make(chan bool)
 
-	// just started peer, should be a follower
-	rf.peerRole = FollowerRole()
+	// just started peer, should be a follower with term as 0
+	rf.UpdateState(0, FollowerRole())
 
 	// initialize from state persisted before a crash
 	//rf.readPersist(persister.ReadRaftState())
@@ -265,12 +275,14 @@ func Make(peers []*labrpc.ClientEnd,
 }
 
 func (rf *Raft) startElectionTimeoutBackgroundProcess() {
-	rand.Seed(time.Now().UnixNano())
-	random := randInt(300, 500)
-	timeoutDuration := time.Duration(random) * time.Millisecond
 
 	go func() {
 		// this background loop should run as long as peer is not leader
+
+		rand.Seed(time.Now().UnixNano())
+		random := randInt(150, 300)
+		timeoutDuration := time.Duration(random) * time.Millisecond
+
 		for rf.peerRole.role != LeaderRole().role {
 
 			timeoutChan := make(chan bool)
@@ -286,7 +298,7 @@ func (rf *Raft) startElectionTimeoutBackgroundProcess() {
 				}
 				break
 			case <-rf.resetElectionTimeoutChan:
-				fmt.Printf("resetElectionTimeoutChan  %v\n", rf.me)
+				//fmt.Printf("resetElectionTimeoutChan  %v\n", rf.me)
 				break
 			}
 		}
@@ -297,26 +309,24 @@ func (rf *Raft) startElectionTimeoutBackgroundProcess() {
 func (rf *Raft) tryTakingLeaderRole() {
 
 	// 1. switch to candidate role if not in that role already
-	if rf.peerRole.role != CandidateRole().role {
-		rf.peerRole = CandidateRole()
-	}
-
 	// 2. increment the term
-	rf.currentTerm++
+	currentTerm, _ := rf.GetState()
+	currentTerm++
+	rf.UpdateState(currentTerm, CandidateRole())
 
 	// 3. request votes from peers
 	for index, _ := range rf.peers {
 
 		if index == rf.me {
 			// mark self vote and ignore requesting vote from self
-			receivedVotesForTerm_, _ := rf.receivedVotesCounter.LoadOrStore(rf.currentTerm, sync.Map{})
+			receivedVotesForTerm_, _ := rf.receivedVotesCounter.LoadOrStore(currentTerm, sync.Map{})
 			receivedVotesForTerm := receivedVotesForTerm_.(sync.Map)
 			receivedVotesForTerm.Store(index, true)
-			rf.receivedVotesCounter.Store(rf.currentTerm, receivedVotesForTerm)
+			rf.receivedVotesCounter.Store(currentTerm, receivedVotesForTerm)
 			continue
 		}
 
-		requestVoteArgs := RequestVoteArgs{rf.me, rf.currentTerm}
+		requestVoteArgs := RequestVoteArgs{rf.me, currentTerm}
 		requestVoteReply := RequestVoteReply{}
 		//peer := peer
 		index := index
@@ -372,13 +382,21 @@ func (rf *Raft) transitionToLeaderIfSufficientVotes(respondingPeerTerm int) {
 	rf.startPeriodicBroadcastBackgroundProcess()
 }
 
+// When Peer is leader
 func (rf *Raft) startPeriodicBroadcastBackgroundProcess() {
 
 	// TODO: This duration should be less than election timeout duration
 	heartBeatDuration := 100 * time.Millisecond
 
 	// should run as long as peer is leader
-	for rf.peerRole.role == LeaderRole().role {
+	for {
+
+		// if not a leader, exit this background process
+		currentTerm, isLeader := rf.GetState()
+		if !isLeader {
+			return
+		}
+
 		heartBeatChan := make(chan bool)
 
 		go func(heartBeatChan chan bool, duration time.Duration) {
@@ -386,7 +404,7 @@ func (rf *Raft) startPeriodicBroadcastBackgroundProcess() {
 			heartBeatChan <- true
 		}(heartBeatChan, heartBeatDuration)
 
-		entryRequestArgs := EntryRequestArgs{rf.me, rf.currentTerm}
+		entryRequestArgs := EntryRequestArgs{rf.me, currentTerm}
 		entryRequestReply := EntryRequestReply{}
 		select {
 		case <-heartBeatChan:
@@ -424,11 +442,12 @@ func (rf *Raft) startPeriodicBroadcastBackgroundProcess() {
 }
 
 func (rf *Raft) AppendEntriesOrHeartbeatRPC(args EntryRequestArgs, reply *EntryRequestReply) {
+	currentTerm, _ := rf.GetState()
 	// HeartBeat logic
 	fmt.Printf("Leader heartBeat received by %v\n", rf.me)
 	rf.resetElectionTimeoutChan <- true
 
-	reply.Term = rf.currentTerm
+	reply.Term = currentTerm
 	reply.Success = true // TODO: need to change for A4
 }
 
