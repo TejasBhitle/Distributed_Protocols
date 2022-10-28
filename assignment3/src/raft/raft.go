@@ -143,17 +143,19 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
+	fmt.Printf("RequestVote [%d %d] \n", args.RequestingPeerTerm, rf.currentTerm)
 
 	var voteDecision bool
 	if args.RequestingPeerTerm < rf.currentTerm {
 		// requesting peer is not on the latest term && desires to be leader
 		// dont vote for it
-		fmt.Printf("RequestVote early exit %d %d \n", args.RequestingPeerTerm, rf.currentTerm)
 		voteDecision = false
+		fmt.Printf("RequestVoteA [%d %d] [%d false] \n", args.RequestingPeerTerm, rf.currentTerm, args.RequestingPeerId)
 
 	} else {
 		votedFor, _ := rf.votedForMap.LoadOrStore(args.RequestingPeerTerm, args.RequestingPeerId)
 		voteDecision = votedFor == args.RequestingPeerId
+		fmt.Printf("RequestVoteB [%d %d] [%d %d] \n", args.RequestingPeerTerm, rf.currentTerm, votedFor, args.RequestingPeerId)
 		//if !voteDecision {
 		//	fmt.Printf("RequestVote %d %d\n", votedFor, args.RequestingPeerId)
 		//}
@@ -180,6 +182,11 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, &reply)
+	return ok
+}
+
+func (rf *Raft) sendAppendEntries(server int, entryRequestArgs EntryRequestArgs, entryRequestReply *EntryRequestReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntriesOrHeartbeatRPC", entryRequestArgs, &entryRequestReply)
 	return ok
 }
 
@@ -259,7 +266,8 @@ func Make(peers []*labrpc.ClientEnd,
 
 func (rf *Raft) startElectionTimeoutBackgroundProcess() {
 	rand.Seed(time.Now().UnixNano())
-	timeoutDuration := time.Duration(randInt(150, 300))
+	random := randInt(300, 500)
+	timeoutDuration := time.Duration(random) * time.Millisecond
 
 	go func() {
 		// this background loop should run as long as peer is not leader
@@ -273,9 +281,12 @@ func (rf *Raft) startElectionTimeoutBackgroundProcess() {
 
 			select {
 			case <-timeoutChan:
-				rf.tryTakingLeaderRole()
+				if rf.peerRole.role != LeaderRole().role {
+					rf.tryTakingLeaderRole()
+				}
 				break
 			case <-rf.resetElectionTimeoutChan:
+				fmt.Printf("resetElectionTimeoutChan  %v\n", rf.me)
 				break
 			}
 		}
@@ -294,7 +305,7 @@ func (rf *Raft) tryTakingLeaderRole() {
 	rf.currentTerm++
 
 	// 3. request votes from peers
-	for index, peer := range rf.peers {
+	for index, _ := range rf.peers {
 
 		if index == rf.me {
 			// mark self vote and ignore requesting vote from self
@@ -307,18 +318,18 @@ func (rf *Raft) tryTakingLeaderRole() {
 
 		requestVoteArgs := RequestVoteArgs{rf.me, rf.currentTerm}
 		requestVoteReply := RequestVoteReply{}
-		peer := peer
+		//peer := peer
 		index := index
 		go func() {
-			ok := peer.Call("Raft.RequestVote", requestVoteArgs, &requestVoteReply)
+			fmt.Printf("tryTakingLeaderRole %v\n", rf.me)
+			ok := rf.sendRequestVote(index, requestVoteArgs, &requestVoteReply)
 			if ok {
 				// got vote reply
-				fmt.Println("tryTakingLeaderRole 2")
+				fmt.Printf("tryTakingLeaderRole %v -> got %v from %v\n", rf.me, requestVoteReply.VotedInFavour, index)
 				receivedVotesCounter_, _ := rf.receivedVotesCounter.LoadOrStore(requestVoteReply.RespondingPeerTerm, sync.Map{})
 				receivedVotesCounter := receivedVotesCounter_.(sync.Map)
 				receivedVotesCounter.Store(index, requestVoteReply.VotedInFavour)
 
-				fmt.Printf("tryTakingLeaderRole 2 done %v\n", requestVoteReply.VotedInFavour)
 				if requestVoteReply.VotedInFavour {
 					rf.transitionToLeaderIfSufficientVotes(requestVoteReply.RespondingPeerTerm)
 				}
@@ -338,7 +349,7 @@ func (rf *Raft) transitionToLeaderIfSufficientVotes(respondingPeerTerm int) {
 		return
 	}
 
-	requiredVotes := len(rf.peers) / 2 // TODO: check threshold
+	requiredVotes := (len(rf.peers) - 1) / 2 // TODO: check threshold
 	receivedVotes := 0
 
 	receivedVotesCounter_, _ := rf.receivedVotesCounter.LoadOrStore(respondingPeerTerm, sync.Map{})
@@ -352,9 +363,10 @@ func (rf *Raft) transitionToLeaderIfSufficientVotes(respondingPeerTerm int) {
 
 	if receivedVotes < requiredVotes {
 		// insufficient votes
+		fmt.Printf("insufficient votes %v\n", rf.me)
 		return
 	}
-
+	fmt.Printf("transitionToLeader %v\n", rf.me)
 	// Make current peer leader
 	rf.peerRole = LeaderRole()
 	rf.startPeriodicBroadcastBackgroundProcess()
@@ -363,7 +375,7 @@ func (rf *Raft) transitionToLeaderIfSufficientVotes(respondingPeerTerm int) {
 func (rf *Raft) startPeriodicBroadcastBackgroundProcess() {
 
 	// TODO: This duration should be less than election timeout duration
-	heartBeatDuration := time.Duration(100)
+	heartBeatDuration := 100 * time.Millisecond
 
 	// should run as long as peer is leader
 	for rf.peerRole.role == LeaderRole().role {
@@ -374,35 +386,47 @@ func (rf *Raft) startPeriodicBroadcastBackgroundProcess() {
 			heartBeatChan <- true
 		}(heartBeatChan, heartBeatDuration)
 
-		entryRequestArgs := EntryRequestArgs{rf.me, rf.currentTerm, []LogData{}}
+		entryRequestArgs := EntryRequestArgs{rf.me, rf.currentTerm}
 		entryRequestReply := EntryRequestReply{}
 		select {
 		case <-heartBeatChan:
 
-			for _, peer := range rf.peers {
-				peer := peer
-				go func() {
-					ok := peer.Call("Raft.AppendEntriesRPC", entryRequestArgs, &entryRequestReply)
-					if ok {
-						// got reply
-					}
-				}()
+			for index, _ := range rf.peers {
+
+				if index == rf.me {
+					// ignore sending msg to self
+					continue
+				}
+
+				if rf.peerRole.role == LeaderRole().role {
+					index := index
+					go func() {
+						fmt.Printf("Leader heartBeat by %v to %v \n", rf.me, index)
+						ok := rf.sendAppendEntries(index, entryRequestArgs, &entryRequestReply)
+						if ok {
+							// got reply
+							fmt.Printf("Leader heartBeat got reply from %v\n", index)
+						} else {
+							fmt.Printf("Leader heartBeat got error from %v\n", index)
+						}
+					}()
+				}
 			}
 
 			break
 		case <-rf.resetHeartBeatTimeoutChan:
 			// called when there is an actual data in log thats to be replicated.
 			// otherwise it sends just heartbeats to the followers
+			fmt.Printf("resetHeartBeatTimeoutChan  %v\n", rf.me)
 			break
 		}
 	}
 }
 
-func (rf *Raft) AppendEntriesRPC(args EntryRequestArgs, reply *EntryRequestReply) {
+func (rf *Raft) AppendEntriesOrHeartbeatRPC(args EntryRequestArgs, reply *EntryRequestReply) {
 	// HeartBeat logic
-	go func() {
-		rf.resetElectionTimeoutChan <- true
-	}()
+	fmt.Printf("Leader heartBeat received by %v\n", rf.me)
+	rf.resetElectionTimeoutChan <- true
 
 	reply.Term = rf.currentTerm
 	reply.Success = true // TODO: need to change for A4
@@ -432,7 +456,7 @@ type LogData struct {
 type EntryRequestArgs struct {
 	LeaderId   int
 	LeaderTerm int
-	LogEntries []LogData
+	//LogEntries []LogData
 }
 
 type EntryRequestReply struct {
