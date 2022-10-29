@@ -64,11 +64,13 @@ func TestReElection(t *testing.T) {
 	// be elected.
 	cfg.disconnect(leader2)
 	cfg.disconnect((leader2 + 1) % servers)
+	//fmt.Printf("========================================disconnected %v and %v\n", leader2, (leader2+1)%servers)
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
 	fmt.Printf("========================================case3 Passed\n")
 
 	// if a quorum arises, it should elect a leader.
+	//fmt.Printf("========================================connected %v \n", (leader2+1)%servers)
 	cfg.connect((leader2 + 1) % servers)
 	cfg.checkOneLeader()
 	fmt.Printf("========================================case4 Passed\n")
@@ -969,9 +971,9 @@ func TestBackgroundThread(t *testing.T) {
 
 func TestRunTestMultipleTimes(t *testing.T) {
 	for i := 0; i < 20; i++ {
-		fmt.Printf("8888888888888888888888888888888888888888888888888\n\n\n")
+		fmt.Printf("\n\n\n Iteration %v\n", i)
 		TestReElection(t)
-		time.Sleep(time.Duration(5000) * time.Millisecond)
+		time.Sleep(time.Duration(2000) * time.Millisecond)
 	}
 
 }

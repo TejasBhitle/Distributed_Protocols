@@ -154,28 +154,26 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
-
+	//fmt.Printf("[Requesting Vote by %v for term %v from server %v] \n", args.RequestingPeerId, args.RequestingPeerTerm, rf.me)
 	currentTerm, _ := rf.GetState()
-	//fmt.Printf("RequestVote [%d %d] \n", args.RequestingPeerTerm, currentTerm)
 
 	var voteDecision bool
 	if args.RequestingPeerTerm < currentTerm {
 		// requesting peer is not on the latest term && desires to be leader
 		// dont vote for it
 		voteDecision = false
-		//fmt.Printf("RequestVoteA [%d %d] [%d false] \n", args.RequestingPeerTerm, currentTerm, args.RequestingPeerId)
 
 	} else {
 		votedFor, _ := rf.votedForMap.LoadOrStore(args.RequestingPeerTerm, args.RequestingPeerId)
 		voteDecision = votedFor == args.RequestingPeerId
+
 		if voteDecision {
 			rf.UpdateState(args.RequestingPeerTerm, FollowerRole())
 			rf.resetElectionTimeoutChan <- true
 		}
-		//fmt.Printf("RequestVoteB [%d %d] [%d %d] \n", args.RequestingPeerTerm, currentTerm, votedFor, args.RequestingPeerId)
 
 	}
-
+	//fmt.Printf("[RequestVote by %v for term %v] [voted %v by %v ] \n", args.RequestingPeerId, args.RequestingPeerTerm, voteDecision, rf.me)
 	reply.VotedInFavour = voteDecision
 	reply.RespondingPeerTerm = args.RequestingPeerTerm
 }
@@ -261,11 +259,15 @@ func Make(peers []*labrpc.ClientEnd,
 	rf.me = me
 
 	// Your initialization code here.
+	//rand.Seed(time.Now().UnixNano())
 	rf.receivedVotesCounter = sync.Map{}
 	rf.votedForMap = sync.Map{}
 	rf.log = []LogData{}
-	rf.resetElectionTimeoutChan = make(chan bool)
-	rf.resetHeartBeatTimeoutChan = make(chan bool)
+
+	// Making this channels buffered as a value might be present on this chan when this peer goes down
+	// and new value wont get added to chan when this peer comes up again
+	rf.resetElectionTimeoutChan = make(chan bool, 20)
+	rf.resetHeartBeatTimeoutChan = make(chan bool, 20)
 
 	// just started peer, should be a follower with term as 0
 	rf.UpdateState(0, FollowerRole())
@@ -283,11 +285,10 @@ func (rf *Raft) startElectionTimeoutBackgroundProcess() {
 	go func() {
 		// this background loop should run as long as peer is not leader
 
-		rand.Seed(time.Now().UnixNano())
-		random := randInt(150, 300)
-		timeoutDuration := time.Duration(random) * time.Millisecond
-
 		for rf.peerRole.role != LeaderRole().role {
+
+			random := randInt(150, 300)
+			timeoutDuration := time.Duration(random) * time.Millisecond
 
 			timeoutChan := make(chan bool)
 			go func(timeoutChan chan bool, timeoutDuration time.Duration) {
@@ -319,6 +320,7 @@ func (rf *Raft) tryTakingLeaderRole() {
 	rf.UpdateState(currentTerm, CandidateRole())
 
 	// 3. request votes from peers
+	//fmt.Printf("tryTakingLeaderRole %v for term %v\n", rf.me, currentTerm)
 	for index, _ := range rf.peers {
 
 		if index == rf.me {
@@ -335,11 +337,10 @@ func (rf *Raft) tryTakingLeaderRole() {
 		//peer := peer
 		index := index
 		go func() {
-			fmt.Printf("tryTakingLeaderRole %v for term %v\n", rf.me, currentTerm)
 			ok := rf.sendRequestVote(index, requestVoteArgs, &requestVoteReply)
 			if ok {
 				// got vote reply
-				fmt.Printf("tryTakingLeaderRole %v -> got %v from %v\n", rf.me, requestVoteReply.VotedInFavour, index)
+				//fmt.Printf("tryTakingLeaderRole %v -> got %v from %v\n", rf.me, requestVoteReply.VotedInFavour, index)
 				receivedVotesCounter_, _ := rf.receivedVotesCounter.LoadOrStore(requestVoteReply.RespondingPeerTerm, sync.Map{})
 				receivedVotesCounter := receivedVotesCounter_.(sync.Map)
 				receivedVotesCounter.Store(index, requestVoteReply.VotedInFavour)
@@ -357,17 +358,17 @@ func (rf *Raft) transitionToLeaderIfSufficientVotes(requestVoteReply RequestVote
 
 	if rf.peerRole.role == LeaderRole().role {
 		// already a leader
-		fmt.Printf("tryTakingLeaderRole %v for term %v -> already a leader\n", rf.me, rf.currentTerm)
+		//fmt.Printf("tryTakingLeaderRole %v for term %v -> already a leader\n", rf.me, rf.currentTerm)
 		return
 	}
 
 	if rf.currentTerm > respondingPeerTerm {
 		// ignore this vote as it was of previous term
-		fmt.Printf("tryTakingLeaderRole %v for term %v -> ignore this vote as it was of previous term %v\n", rf.me, rf.currentTerm, respondingPeerTerm)
+		//fmt.Printf("tryTakingLeaderRole %v for term %v -> ignore this vote as it was of previous term %v\n", rf.me, rf.currentTerm, respondingPeerTerm)
 		return
 	}
 
-	requiredVotes := (len(rf.peers) - 1) / 2 // TODO: check threshold
+	requiredVotes := (len(rf.peers) - 1) / 2
 	receivedVotes := 0
 
 	receivedVotesCounter_, _ := rf.receivedVotesCounter.LoadOrStore(respondingPeerTerm, sync.Map{})
@@ -381,10 +382,10 @@ func (rf *Raft) transitionToLeaderIfSufficientVotes(requestVoteReply RequestVote
 
 	if receivedVotes < requiredVotes && receivedVotes > 1 {
 		// insufficient votes
-		fmt.Printf("insufficient votes %v\n", rf.me)
+		//fmt.Printf("insufficient votes %v\n", rf.me)
 		return
 	}
-	fmt.Printf("TRANSITION To Leader %v for term %v\n", rf.me, rf.currentTerm)
+	//fmt.Printf("TRANSITION To Leader %v for term %v\n", rf.me, rf.currentTerm)
 	// Make current peer leader
 	rf.peerRole = LeaderRole()
 	rf.startPeriodicBroadcastBackgroundProcess()
@@ -477,7 +478,6 @@ func FollowerRole() PeerRole  { return PeerRole{0} }
 func CandidateRole() PeerRole { return PeerRole{1} }
 func LeaderRole() PeerRole    { return PeerRole{2} }
 
-// LogData TODO check if predefined struct needs to be used
 type LogData struct {
 	command interface{} // command for the state machine
 	term    int         // term when the entry was received by the leader
