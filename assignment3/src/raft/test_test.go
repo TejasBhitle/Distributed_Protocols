@@ -52,11 +52,13 @@ func TestReElection(t *testing.T) {
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
+	fmt.Printf("========================================case1 Passed\n")
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the old leader.
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
+	fmt.Printf("========================================case2 Passed\n")
 
 	// if there's no quorum, no leader should
 	// be elected.
@@ -64,10 +66,12 @@ func TestReElection(t *testing.T) {
 	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
+	fmt.Printf("========================================case3 Passed\n")
 
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
 	cfg.checkOneLeader()
+	fmt.Printf("========================================case4 Passed\n")
 
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
@@ -961,4 +965,13 @@ func TestBackgroundThread(t *testing.T) {
 	}()
 
 	<-done // wait for test case to complete
+}
+
+func TestRunTestMultipleTimes(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		fmt.Printf("8888888888888888888888888888888888888888888888888\n\n\n")
+		TestReElection(t)
+		time.Sleep(time.Duration(5000) * time.Millisecond)
+	}
+
 }

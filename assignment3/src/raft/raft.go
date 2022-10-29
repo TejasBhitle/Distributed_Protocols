@@ -80,8 +80,8 @@ func (rf *Raft) GetState() (int, bool) {
 	var isleader bool
 	// Your code here.
 
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
 
 	term = rf.currentTerm
 	isleader = rf.peerRole.role == LeaderRole().role
@@ -90,8 +90,8 @@ func (rf *Raft) GetState() (int, bool) {
 }
 
 func (rf *Raft) UpdateState(newTerm int, newRole PeerRole) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
 
 	rf.currentTerm = newTerm
 	rf.peerRole = newRole
@@ -168,12 +168,16 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	} else {
 		votedFor, _ := rf.votedForMap.LoadOrStore(args.RequestingPeerTerm, args.RequestingPeerId)
 		voteDecision = votedFor == args.RequestingPeerId
+		if voteDecision {
+			rf.UpdateState(args.RequestingPeerTerm, FollowerRole())
+			rf.resetElectionTimeoutChan <- true
+		}
 		//fmt.Printf("RequestVoteB [%d %d] [%d %d] \n", args.RequestingPeerTerm, currentTerm, votedFor, args.RequestingPeerId)
 
 	}
 
 	reply.VotedInFavour = voteDecision
-	reply.RespondingPeerTerm = currentTerm
+	reply.RespondingPeerTerm = args.RequestingPeerTerm
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -331,7 +335,7 @@ func (rf *Raft) tryTakingLeaderRole() {
 		//peer := peer
 		index := index
 		go func() {
-			fmt.Printf("tryTakingLeaderRole %v\n", rf.me)
+			fmt.Printf("tryTakingLeaderRole %v for term %v\n", rf.me, currentTerm)
 			ok := rf.sendRequestVote(index, requestVoteArgs, &requestVoteReply)
 			if ok {
 				// got vote reply
@@ -341,21 +345,25 @@ func (rf *Raft) tryTakingLeaderRole() {
 				receivedVotesCounter.Store(index, requestVoteReply.VotedInFavour)
 
 				if requestVoteReply.VotedInFavour {
-					rf.transitionToLeaderIfSufficientVotes(requestVoteReply.RespondingPeerTerm)
+					rf.transitionToLeaderIfSufficientVotes(requestVoteReply)
 				}
 			}
 		}()
 	}
 }
 
-func (rf *Raft) transitionToLeaderIfSufficientVotes(respondingPeerTerm int) {
+func (rf *Raft) transitionToLeaderIfSufficientVotes(requestVoteReply RequestVoteReply) {
+	respondingPeerTerm := requestVoteReply.RespondingPeerTerm
+
 	if rf.peerRole.role == LeaderRole().role {
 		// already a leader
+		fmt.Printf("tryTakingLeaderRole %v for term %v -> already a leader\n", rf.me, rf.currentTerm)
 		return
 	}
 
 	if rf.currentTerm > respondingPeerTerm {
 		// ignore this vote as it was of previous term
+		fmt.Printf("tryTakingLeaderRole %v for term %v -> ignore this vote as it was of previous term %v\n", rf.me, rf.currentTerm, respondingPeerTerm)
 		return
 	}
 
@@ -371,12 +379,12 @@ func (rf *Raft) transitionToLeaderIfSufficientVotes(respondingPeerTerm int) {
 		return true
 	})
 
-	if receivedVotes < requiredVotes {
+	if receivedVotes < requiredVotes && receivedVotes > 1 {
 		// insufficient votes
 		fmt.Printf("insufficient votes %v\n", rf.me)
 		return
 	}
-	fmt.Printf("transitionToLeader %v\n", rf.me)
+	fmt.Printf("TRANSITION To Leader %v for term %v\n", rf.me, rf.currentTerm)
 	// Make current peer leader
 	rf.peerRole = LeaderRole()
 	rf.startPeriodicBroadcastBackgroundProcess()
@@ -419,13 +427,13 @@ func (rf *Raft) startPeriodicBroadcastBackgroundProcess() {
 				if rf.peerRole.role == LeaderRole().role {
 					index := index
 					go func() {
-						fmt.Printf("Leader heartBeat by %v to %v \n", rf.me, index)
+						//fmt.Printf("Leader heartBeat by %v to %v \n", rf.me, index)
 						ok := rf.sendAppendEntries(index, entryRequestArgs, &entryRequestReply)
 						if ok {
 							// got reply
-							fmt.Printf("Leader heartBeat got reply from %v\n", index)
+							//fmt.Printf("Leader heartBeat got reply from %v\n", index)
 						} else {
-							fmt.Printf("Leader heartBeat got error from %v\n", index)
+							//fmt.Printf("Leader heartBeat got error from %v\n", index)
 						}
 					}()
 				}
@@ -444,7 +452,10 @@ func (rf *Raft) startPeriodicBroadcastBackgroundProcess() {
 func (rf *Raft) AppendEntriesOrHeartbeatRPC(args EntryRequestArgs, reply *EntryRequestReply) {
 	currentTerm, _ := rf.GetState()
 	// HeartBeat logic
-	fmt.Printf("Leader heartBeat received by %v\n", rf.me)
+	//fmt.Printf("[Leader %v] heartBeat received by %v\n", args.LeaderId, rf.me)
+	if rf.peerRole == LeaderRole() {
+		rf.peerRole = FollowerRole()
+	}
 	rf.resetElectionTimeoutChan <- true
 
 	reply.Term = currentTerm

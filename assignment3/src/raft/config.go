@@ -305,9 +305,9 @@ func (cfg *config) checkTerms() int {
 func (cfg *config) checkNoLeader() {
 	for i := 0; i < cfg.n; i++ {
 		if cfg.connected[i] {
-			_, is_leader := cfg.rafts[i].GetState()
+			term, is_leader := cfg.rafts[i].GetState()
 			if is_leader {
-				cfg.t.Fatalf("expected no leader, but %v claims to be leader\n", i)
+				cfg.t.Fatalf("expected no leader, but %v claims to be leader for term %v\n", i, term)
 			}
 		}
 	}
