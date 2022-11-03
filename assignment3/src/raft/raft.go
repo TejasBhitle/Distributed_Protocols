@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 )
-import "a3/labrpc"
+import "labrpc"
 
 // import "bytes"
 // import "encoding/gob"
