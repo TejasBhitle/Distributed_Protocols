@@ -52,22 +52,28 @@ func TestReElection(t *testing.T) {
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
+	fmt.Printf("========================================case1 Passed\n")
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the old leader.
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
+	fmt.Printf("========================================case2 Passed\n")
 
 	// if there's no quorum, no leader should
 	// be elected.
 	cfg.disconnect(leader2)
 	cfg.disconnect((leader2 + 1) % servers)
+	//fmt.Printf("========================================disconnected %v and %v\n", leader2, (leader2+1)%servers)
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
+	fmt.Printf("========================================case3 Passed\n")
 
 	// if a quorum arises, it should elect a leader.
+	//fmt.Printf("========================================connected %v \n", (leader2+1)%servers)
 	cfg.connect((leader2 + 1) % servers)
 	cfg.checkOneLeader()
+	fmt.Printf("========================================case4 Passed\n")
 
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
@@ -625,7 +631,6 @@ func TestPersist3(t *testing.T) {
 	fmt.Println("... Passed")
 }
 
-//
 // Test the scenarios described in Figure 8 of the extended Raft paper. Each
 // iteration asks a leader, if there is one, to insert a command in the Raft
 // log.  If there is a leader, that leader will fail quickly with a high
@@ -634,7 +639,6 @@ func TestPersist3(t *testing.T) {
 // alive servers isn't enough to form a majority, perhaps start a new server.
 // The leader in a new term may try to finish replicating log entries that
 // haven't been committed yet.
-//
 func TestFigure8(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, false)
@@ -926,4 +930,50 @@ func TestReliableChurn(t *testing.T) {
 
 func TestUnreliableChurn(t *testing.T) {
 	internalChurn(t, true)
+}
+
+func TestBackgroundThread(t *testing.T) {
+
+	rand.Seed(time.Now().UnixNano())
+	timeoutDuration1 := 1000 * time.Millisecond
+	timeoutDuration2 := 3000 * time.Millisecond
+
+	done := make(chan bool)
+
+	go func() {
+		for i := 0; i < 15; i++ {
+			timeoutChan1 := make(chan int)
+			go func(timeoutChan1 chan int, timeoutDuration1 time.Duration, i int) {
+				time.Sleep(timeoutDuration1)
+				timeoutChan1 <- i
+			}(timeoutChan1, timeoutDuration1, i)
+
+			timeoutChan2 := make(chan int)
+			go func(timeoutChan2 chan int, timeoutDuration2 time.Duration, i int) {
+				time.Sleep(timeoutDuration2)
+				timeoutChan2 <- i
+			}(timeoutChan2, timeoutDuration2, i)
+
+			select {
+			case i := <-timeoutChan1:
+				fmt.Printf("timeoutChan1 %v\n", i)
+				break
+			case j := <-timeoutChan2:
+				fmt.Printf("timeoutChan2 %v\n", j)
+				break
+			}
+		}
+		done <- true
+	}()
+
+	<-done // wait for test case to complete
+}
+
+func TestRunTestMultipleTimes(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		fmt.Printf("\n\n\n Iteration %v\n", i)
+		TestReElection(t)
+		time.Sleep(time.Duration(2000) * time.Millisecond)
+	}
+
 }
