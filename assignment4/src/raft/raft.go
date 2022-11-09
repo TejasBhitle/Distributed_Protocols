@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -37,6 +36,9 @@ type ApplyMsg struct {
 	UseSnapshot bool   // ignore for lab2; only used in lab3
 	Snapshot    []byte // ignore for lab2; only used in lab3
 }
+
+// This duration should be less than election timeout duration
+const heartBeatDuration = 100 * time.Millisecond
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
@@ -61,16 +63,31 @@ type Raft struct {
 	/* K,V -> term, (K,V) -> peerId, voteInFavour */
 	receivedVotesCounter sync.Map
 
-	/* actual log */
-	log []LogData
-
 	/* send true on this channel to reset the election timeout
 	To be used only when this peer is not a leader */
 	resetElectionTimeoutChan chan bool
 
-	/* send true on this channel to interrupt the heartbeat this leader will send in case there are no log replication requests
+	/* send index of the log on this channel to interrupt the heartbeat (this leader will send) in case there are no log replication requests
 	To be used only when this peer is a leader */
-	resetHeartBeatTimeoutChan chan bool
+	relayToPeerChan chan int
+
+	//---------------------- fields used for Log Replication
+	/* actual log */
+	log []*LogItem
+
+	confirmationCountMaps []map[int]ConfirmationStatus // for tentative & commit conformation
+
+	/* index where leader will send next entry */
+	nextIndex int
+
+	/* leader and peer agree on log entries upto matchIndex */
+	matchIndex int
+
+	/* match Indexes of peers. [Only applicable when this peer is leader]*/
+	matchIndexesOf map[int]int
+
+	/* index till which entries are committed */
+	commitIndex int
 }
 
 // return currentTerm and whether this server
@@ -79,9 +96,6 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here.
-
-	//rf.mu.Lock()
-	//defer rf.mu.Unlock()
 
 	term = rf.currentTerm
 	isleader = rf.peerRole.role == LeaderRole().role
@@ -223,7 +237,31 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term, isLeader = rf.GetState()
 
 	if isLeader {
-		// TODO: write to log, maintaining the state of each item (commit or tentative)
+		// TODO: write to log
+
+		// 1. Init the logItem and metadata
+		logItem := LogItem{
+			Command:     command,
+			Term:        term,
+			IsCommitted: false,
+		}
+		confirmationMap := rf.generateInitialConfirmationStatusMap()
+		confirmationMap[rf.me] = Accepted()
+
+		go func() {
+			rf.mu.Lock()
+
+			// 2. Write to own log [use Critical Section]
+			rf.log = append(rf.log, &logItem)
+			rf.confirmationCountMaps = append(rf.confirmationCountMaps, confirmationMap)
+			rf.nextIndex++
+
+			// 3. Send replication request to the all other peers
+			rf.relayToPeerChan <- rf.nextIndex
+
+			rf.mu.Unlock()
+		}()
+
 	}
 
 	return index, term, isLeader
@@ -262,12 +300,12 @@ func Make(peers []*labrpc.ClientEnd,
 	//rand.Seed(time.Now().UnixNano())
 	rf.receivedVotesCounter = sync.Map{}
 	rf.votedForMap = sync.Map{}
-	rf.log = []LogData{}
+	rf.log = []*LogItem{}
 
 	// Making this channels buffered as a value might be present on this chan when this peer goes down
 	// and new value wont get added to chan when this peer comes up again
 	rf.resetElectionTimeoutChan = make(chan bool, 20)
-	rf.resetHeartBeatTimeoutChan = make(chan bool, 20)
+	rf.relayToPeerChan = make(chan int, 20)
 
 	// just started peer, should be a follower with term as 0
 	rf.UpdateState(0, FollowerRole())
@@ -394,9 +432,6 @@ func (rf *Raft) transitionToLeaderIfSufficientVotes(requestVoteReply RequestVote
 // When Peer is leader
 func (rf *Raft) startPeriodicBroadcastBackgroundProcess() {
 
-	// TODO: This duration should be less than election timeout duration
-	heartBeatDuration := 100 * time.Millisecond
-
 	// should run as long as peer is leader
 	for {
 
@@ -413,40 +448,45 @@ func (rf *Raft) startPeriodicBroadcastBackgroundProcess() {
 			heartBeatChan <- true
 		}(heartBeatChan, heartBeatDuration)
 
-		entryRequestArgs := EntryRequestArgs{rf.me, currentTerm}
-		entryRequestReply := EntryRequestReply{}
 		select {
 		case <-heartBeatChan:
-
-			for index, _ := range rf.peers {
-
-				if index == rf.me {
-					// ignore sending msg to self
-					continue
-				}
-
-				if rf.peerRole.role == LeaderRole().role {
-					index := index
-					go func() {
-						//fmt.Printf("Leader heartBeat by %v to %v \n", rf.me, index)
-						ok := rf.sendAppendEntries(index, entryRequestArgs, &entryRequestReply)
-						if ok {
-							// got reply
-							//fmt.Printf("Leader heartBeat got reply from %v\n", index)
-						} else {
-							//fmt.Printf("Leader heartBeat got error from %v\n", index)
-						}
-					}()
-				}
-			}
-
+			rf.relayToAllPeers(currentTerm, nil)
 			break
-		case <-rf.resetHeartBeatTimeoutChan:
-			// called when there is an actual data in log thats to be replicated.
-			// otherwise it sends just heartbeats to the followers
-			fmt.Printf("resetHeartBeatTimeoutChan  %v\n", rf.me)
+		case logIndex := <-rf.relayToPeerChan:
+			payload := &EntryRequestPayload{rf.log[logIndex]}
+			rf.relayToAllPeers(currentTerm, payload)
 			break
 		}
+	}
+}
+
+func (rf *Raft) relayToAllPeers(currentTerm int, entryRequestPayload *EntryRequestPayload) {
+
+	if rf.peerRole.role != LeaderRole().role {
+		return
+	}
+
+	entryRequestArgs := EntryRequestArgs{rf.me, currentTerm, entryRequestPayload}
+	entryRequestReply := EntryRequestReply{}
+
+	for index, _ := range rf.peers {
+		// ignore sending msg to self
+		if index == rf.me {
+			continue
+		}
+
+		index := index
+		go func() {
+			//fmt.Printf("Leader heartBeat by %v to %v \n", rf.me, index)
+			ok := rf.sendAppendEntries(index, entryRequestArgs, &entryRequestReply)
+			if ok {
+				// got reply
+				//fmt.Printf("Leader heartBeat got reply from %v\n", index)
+			} else {
+				//fmt.Printf("Leader heartBeat got error from %v\n", index)
+			}
+		}()
+
 	}
 }
 
@@ -454,7 +494,7 @@ func (rf *Raft) AppendEntriesOrHeartbeatRPC(args EntryRequestArgs, reply *EntryR
 	currentTerm, _ := rf.GetState()
 	// HeartBeat logic
 	//fmt.Printf("[Leader %v] heartBeat received by %v\n", args.LeaderId, rf.me)
-	if rf.peerRole == LeaderRole() {
+	if rf.peerRole != FollowerRole() {
 		rf.peerRole = FollowerRole()
 	}
 	rf.resetElectionTimeoutChan <- true
@@ -478,18 +518,48 @@ func FollowerRole() PeerRole  { return PeerRole{0} }
 func CandidateRole() PeerRole { return PeerRole{1} }
 func LeaderRole() PeerRole    { return PeerRole{2} }
 
-type LogData struct {
-	command interface{} // command for the state machine
-	term    int         // term when the entry was received by the leader
+type LogItem struct {
+	Command     interface{} // command for the state machine
+	Term        int         // term when the entry was received by the leader
+	IsCommitted bool
 }
 
 type EntryRequestArgs struct {
-	LeaderId   int
-	LeaderTerm int
-	//LogEntries []LogData
+	LeaderId            int
+	LeaderTerm          int
+	EntryRequestPayload *EntryRequestPayload
 }
 
 type EntryRequestReply struct {
 	Term    int
 	Success bool
+}
+
+type EntryRequestPayload struct {
+	*LogItem
+}
+
+// ReconciliationResult Enum
+type ReconciliationResult struct {
+	result int
+}
+
+func LeaderAccurate() ReconciliationResult { return ReconciliationResult{0} }
+func PeerAccurate() ReconciliationResult   { return ReconciliationResult{1} }
+
+// ConfirmationStatus Enum
+type ConfirmationStatus struct {
+	status int
+}
+
+func Accepted() ConfirmationStatus   { return ConfirmationStatus{0} }
+func Rejected() ConfirmationStatus   { return ConfirmationStatus{1} }
+func NoResponse() ConfirmationStatus { return ConfirmationStatus{2} }
+
+func (rf *Raft) generateInitialConfirmationStatusMap() map[int]ConfirmationStatus {
+	confirmationMap := map[int]ConfirmationStatus{}
+	for index, _ := range rf.peers {
+		confirmationMap[index] = NoResponse()
+	}
+	return confirmationMap
 }

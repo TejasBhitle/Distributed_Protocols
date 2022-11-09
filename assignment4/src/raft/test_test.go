@@ -78,6 +78,7 @@ func TestReElection(t *testing.T) {
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
 	cfg.checkOneLeader()
+	fmt.Printf("========================================case5 Passed\n")
 
 	fmt.Println("... Passed")
 }
