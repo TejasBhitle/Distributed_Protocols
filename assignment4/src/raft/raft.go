@@ -80,9 +80,6 @@ type Raft struct {
 	/* index where leader will send next entry */
 	nextIndex int
 
-	/* leader and peer agree on log entries upto matchIndex */
-	matchIndex int
-
 	/* match Indexes of peers. [Only applicable when this peer is leader]*/
 	matchIndexesOf map[int]int
 
