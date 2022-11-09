@@ -250,6 +250,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 		go func() {
 			rf.mu.Lock()
+			defer rf.mu.Unlock()
 
 			// 2. Write to own log [use Critical Section]
 			rf.log = append(rf.log, &logItem)
@@ -258,8 +259,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 			// 3. Send replication request to the all other peers
 			rf.relayToPeerChan <- rf.nextIndex
-
-			rf.mu.Unlock()
 		}()
 
 	}
@@ -492,6 +491,14 @@ func (rf *Raft) relayToAllPeers(currentTerm int, entryRequestPayload *EntryReque
 
 func (rf *Raft) AppendEntriesOrHeartbeatRPC(args EntryRequestArgs, reply *EntryRequestReply) {
 	currentTerm, _ := rf.GetState()
+	reply.Term = currentTerm
+
+	if currentTerm > args.LeaderTerm {
+		// reject heartbeat/appendEntries
+		reply.SuccessCode = _401_OldLeader()
+		return
+	}
+
 	// HeartBeat logic
 	//fmt.Printf("[Leader %v] heartBeat received by %v\n", args.LeaderId, rf.me)
 	if rf.peerRole != FollowerRole() {
@@ -499,8 +506,7 @@ func (rf *Raft) AppendEntriesOrHeartbeatRPC(args EntryRequestArgs, reply *EntryR
 	}
 	rf.resetElectionTimeoutChan <- true
 
-	reply.Term = currentTerm
-	reply.Success = true // TODO: need to change for A4
+	reply.SuccessCode = _200_OK()
 }
 
 func randInt(min int, max int) int {
@@ -531,8 +537,8 @@ type EntryRequestArgs struct {
 }
 
 type EntryRequestReply struct {
-	Term    int
-	Success bool
+	Term        int
+	SuccessCode SuccessCode
 }
 
 type EntryRequestPayload struct {
@@ -563,3 +569,10 @@ func (rf *Raft) generateInitialConfirmationStatusMap() map[int]ConfirmationStatu
 	}
 	return confirmationMap
 }
+
+type SuccessCode struct {
+	Code int
+}
+
+func _200_OK() SuccessCode        { return SuccessCode{200} }
+func _401_OldLeader() SuccessCode { return SuccessCode{401} }
