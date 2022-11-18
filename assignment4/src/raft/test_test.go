@@ -333,7 +333,7 @@ func TestBackup(t *testing.T) {
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
 
-	fmt.Print("Test: leader backs up quickly over incorrect follower logs...")
+	fmt.Print("Test: leader backs up quickly over incorrect follower Logs...")
 
 	cfg.one(rand.Int(), servers)
 

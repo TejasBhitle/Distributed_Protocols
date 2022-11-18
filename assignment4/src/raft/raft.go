@@ -69,22 +69,25 @@ type Raft struct {
 
 	/* send index of the log on this channel to interrupt the heartbeat (this leader will send) in case there are no log replication requests
 	To be used only when this peer is a leader */
-	relayToPeerChan chan int
+	//relayToPeerChan chan int
 
-	//---------------------- fields used for Log Replication
+	//---------------------- fields used for Log Replication by Peers
 	/* actual log */
 	log []*LogItem
 
-	confirmationCountMaps []map[int]ConfirmationStatus // for tentative & commit conformation
-
-	/* index where leader will send next entry */
+	/* index where leader / peer will receive next entry from client / leader respectively */
 	nextIndex int
-
-	/* match Indexes of peers. [Only applicable when this peer is leader]*/
-	matchIndexesOf map[int]int
 
 	/* index till which entries are committed */
 	commitIndex int
+
+	//---------------------- fields used for Log Replication by Leaders
+
+	/* for tentative & commit conformation */
+	confirmationCountsList []map[int]ConfirmationStatus
+
+	/* match Indexes of peers. [Only applicable when this peer is leader]*/
+	matchIndexesOf map[int]int
 }
 
 // return currentTerm and whether this server
@@ -151,8 +154,9 @@ func (rf *Raft) readPersist(data []byte) {
 // example RequestVote RPC arguments structure.
 type RequestVoteArgs struct {
 	// Your data here.
-	RequestingPeerId   int
-	RequestingPeerTerm int
+	RequestingPeerId       int
+	RequestingPeerTerm     int
+	LogsCountInCurrentTerm int
 }
 
 // example RequestVote RPC reply structure.
@@ -166,27 +170,35 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
 	//fmt.Printf("[Requesting Vote by %v for term %v from server %v] \n", args.RequestingPeerId, args.RequestingPeerTerm, rf.me)
-	currentTerm, _ := rf.GetState()
 
-	var voteDecision bool
-	if args.RequestingPeerTerm < currentTerm {
-		// requesting peer is not on the latest term && desires to be leader
-		// dont vote for it
-		voteDecision = false
+	reply.RespondingPeerTerm = args.RequestingPeerTerm
+
+	// If already voted for someone else for this term
+	votedFor, _ := rf.votedForMap.Load(args.RequestingPeerTerm)
+	if votedFor != nil {
+		reply.VotedInFavour = votedFor == args.RequestingPeerId
 
 	} else {
-		votedFor, _ := rf.votedForMap.LoadOrStore(args.RequestingPeerTerm, args.RequestingPeerId)
-		voteDecision = votedFor == args.RequestingPeerId
 
-		if voteDecision {
-			rf.UpdateState(args.RequestingPeerTerm, FollowerRole())
-			rf.resetElectionTimeoutChan <- true
+		currentTerm, _ := rf.GetState()
+
+		if args.RequestingPeerTerm < currentTerm {
+			// requesting peer is not on the latest term && desires to be leader -> reject
+			reply.VotedInFavour = false
+
+		} else if args.LogsCountInCurrentTerm < getNumOfLogsOfGivenTerm(rf.currentTerm, rf.log) {
+			// for the latest term, peer has more log entries than candidate -> reject
+			reply.VotedInFavour = false
+
 		}
-
 	}
+
+	if reply.VotedInFavour {
+		rf.UpdateState(args.RequestingPeerTerm, FollowerRole())
+		rf.resetElectionTimeoutChan <- true
+	}
+
 	//fmt.Printf("[RequestVote by %v for term %v] [voted %v by %v ] \n", args.RequestingPeerId, args.RequestingPeerTerm, voteDecision, rf.me)
-	reply.VotedInFavour = voteDecision
-	reply.RespondingPeerTerm = args.RequestingPeerTerm
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -251,11 +263,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 			// 2. Write to own log [use Critical Section]
 			rf.log = append(rf.log, &logItem)
-			rf.confirmationCountMaps = append(rf.confirmationCountMaps, confirmationMap)
+			rf.confirmationCountsList = append(rf.confirmationCountsList, confirmationMap)
 			rf.nextIndex++
 
 			// 3. Send replication request to the all other peers
-			rf.relayToPeerChan <- rf.nextIndex
+			//rf.relayToPeerChan <- rf.nextIndex
 		}()
 
 	}
@@ -301,7 +313,7 @@ func Make(peers []*labrpc.ClientEnd,
 	// Making this channels buffered as a value might be present on this chan when this peer goes down
 	// and new value wont get added to chan when this peer comes up again
 	rf.resetElectionTimeoutChan = make(chan bool, 20)
-	rf.relayToPeerChan = make(chan int, 20)
+	//rf.relayToPeerChan = make(chan int, 20)
 
 	// just started peer, should be a follower with term as 0
 	rf.UpdateState(0, FollowerRole())
@@ -353,6 +365,12 @@ func (rf *Raft) tryTakingLeaderRole() {
 	currentTerm++
 	rf.UpdateState(currentTerm, CandidateRole())
 
+	rf.mu.Lock()
+	log := rf.log
+	rf.mu.Unlock()
+
+	logsCount := getNumOfLogsOfGivenTerm(currentTerm, log)
+
 	// 3. request votes from peers
 	//fmt.Printf("tryTakingLeaderRole %v for term %v\n", rf.me, currentTerm)
 	for index, _ := range rf.peers {
@@ -361,12 +379,12 @@ func (rf *Raft) tryTakingLeaderRole() {
 			// mark self vote and ignore requesting vote from self
 			receivedVotesForTerm_, _ := rf.receivedVotesCounter.LoadOrStore(currentTerm, sync.Map{})
 			receivedVotesForTerm := receivedVotesForTerm_.(sync.Map)
-			receivedVotesForTerm.Store(index, true)
+			receivedVotesForTerm.Store(rf.me, true)
 			rf.receivedVotesCounter.Store(currentTerm, receivedVotesForTerm)
 			continue
 		}
 
-		requestVoteArgs := RequestVoteArgs{rf.me, currentTerm}
+		requestVoteArgs := RequestVoteArgs{rf.me, currentTerm, logsCount}
 		requestVoteReply := RequestVoteReply{}
 		//peer := peer
 		index := index
@@ -444,57 +462,64 @@ func (rf *Raft) startPeriodicBroadcastBackgroundProcess() {
 			heartBeatChan <- true
 		}(heartBeatChan, heartBeatDuration)
 
-		select {
-		case <-heartBeatChan:
-			rf.relayToAllPeers(currentTerm, nil)
-			break
-		case logIndex := <-rf.relayToPeerChan:
-			payload := &EntryRequestPayload{rf.log[logIndex]}
-			rf.relayToAllPeers(currentTerm, payload)
-			break
-		}
+		<-heartBeatChan
+		rf.relayToAllPeers(currentTerm)
+
 	}
 }
 
-func (rf *Raft) relayToAllPeers(currentTerm int, entryRequestPayload *EntryRequestPayload) {
+func (rf *Raft) relayToAllPeers(currentTerm int) {
 
 	if rf.peerRole.role != LeaderRole().role {
 		return
 	}
 
-	entryRequestArgs := EntryRequestArgs{rf.me, currentTerm, entryRequestPayload}
-	entryRequestReply := EntryRequestReply{}
-
-	for index, _ := range rf.peers {
+	for peerIndex, _ := range rf.peers {
 		// ignore sending msg to self
-		if index == rf.me {
+		if peerIndex == rf.me {
 			continue
 		}
 
-		index := index
-		go func() {
-			//fmt.Printf("Leader heartBeat by %v to %v \n", rf.me, index)
+		entryRequestArgs := EntryRequestArgs{rf.me, currentTerm, rf.getPayloadForPeer(peerIndex, currentTerm)}
+		entryRequestReply := EntryRequestReply{}
+
+		go func(index int, entryRequestArgs EntryRequestArgs, entryRequestReply EntryRequestReply) {
+			//fmt.Printf("Leader heartBeat by %v to %v \n", rf.me, peerIndex)
 			ok := rf.sendAppendEntries(index, entryRequestArgs, &entryRequestReply)
 			if ok {
 				// got reply
-				//fmt.Printf("Leader heartBeat got reply from %v\n", index)
+				//fmt.Printf("Leader heartBeat got reply from %v\n", peerIndex)
 			} else {
-				//fmt.Printf("Leader heartBeat got error from %v\n", index)
+				//fmt.Printf("Leader heartBeat got error from %v\n", peerIndex)
 			}
-		}()
+		}(peerIndex, entryRequestArgs, entryRequestReply)
 
 	}
 }
 
+func (rf *Raft) getPayloadForPeer(peer int, currentTerm int) *EntryRequestPayload {
+	payload := EntryRequestPayload{}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// 1. Get the uncommitted Logs to send to this peer
+	matchIndex := rf.matchIndexesOf[peer]
+	payload.Logs = rf.log[matchIndex:rf.nextIndex]
+	payload.MatchIndex = matchIndex
+	payload.NumOfLogsOfCurrentTerm = getNumOfLogsOfGivenTerm(currentTerm, rf.log)
+
+	return &payload
+}
+
+// AppendEntriesOrHeartbeatRPC : PEER receiving the appendEntries or Heartbeat call
 func (rf *Raft) AppendEntriesOrHeartbeatRPC(args EntryRequestArgs, reply *EntryRequestReply) {
 	currentTerm, _ := rf.GetState()
 	reply.Term = currentTerm
 
-	if currentTerm > args.LeaderTerm {
-		// reject heartbeat/appendEntries
-		reply.SuccessCode = _401_OldLeader()
-		return
-	}
+	rf.mu.Lock()
+	reconcileLogs(args, rf.log, currentTerm)
+	rf.mu.Unlock()
 
 	// HeartBeat logic
 	//fmt.Printf("[Leader %v] heartBeat received by %v\n", args.LeaderId, rf.me)
@@ -503,7 +528,55 @@ func (rf *Raft) AppendEntriesOrHeartbeatRPC(args EntryRequestArgs, reply *EntryR
 	}
 	rf.resetElectionTimeoutChan <- true
 
-	reply.SuccessCode = _200_OK()
+	reply.ErrorCode = _200_OK()
+}
+
+func reconcileLogs(
+	args EntryRequestArgs,
+	peerLog []*LogItem,
+	peerTerm int) ErrorCode {
+
+	leaderLog := args.EntryRequestPayload.Logs
+	leaderTerm := args.LeaderTerm
+	leaderLogsCountOfCurrentTerm := args.EntryRequestPayload.NumOfLogsOfCurrentTerm
+	matchIndex := args.EntryRequestPayload.MatchIndex
+
+	if peerTerm > leaderTerm {
+		// reject heartbeat/appendEntries
+		return _401_OlderTerm()
+	}
+
+	// If Payload exists
+	if leaderLog != nil && len(leaderLog) != 0 {
+
+		if leaderLogsCountOfCurrentTerm < getNumOfLogsOfGivenTerm(peerTerm, peerLog) {
+			// reject
+			return _402_MoreNumOfLogsOfCurrentTerm()
+		}
+
+		if matchIndex >= len(peerLog) ||
+			leaderLog[matchIndex] != peerLog[matchIndex] {
+
+			// matchIndex log is not matching with leader
+			return _403_UnequalLogsAtMatchIndex()
+		}
+	}
+	
+	return _200_OK()
+}
+
+/* Helper functions */
+func getNumOfLogsOfGivenTerm(currentTerm int, logs []*LogItem) int {
+	count := 0
+	logLen := len(logs)
+	for i := logLen - 1; i >= 0; i-- {
+		if logs[i].Term == currentTerm {
+			count++
+		} else {
+			break
+		}
+	}
+	return count
 }
 
 func randInt(min int, max int) int {
@@ -534,12 +607,14 @@ type EntryRequestArgs struct {
 }
 
 type EntryRequestReply struct {
-	Term        int
-	SuccessCode SuccessCode
+	Term      int
+	ErrorCode ErrorCode
 }
 
 type EntryRequestPayload struct {
-	*LogItem
+	Logs                   []*LogItem
+	MatchIndex             int
+	NumOfLogsOfCurrentTerm int
 }
 
 // ReconciliationResult Enum
@@ -567,9 +642,11 @@ func (rf *Raft) generateInitialConfirmationStatusMap() map[int]ConfirmationStatu
 	return confirmationMap
 }
 
-type SuccessCode struct {
+type ErrorCode struct {
 	Code int
 }
 
-func _200_OK() SuccessCode        { return SuccessCode{200} }
-func _401_OldLeader() SuccessCode { return SuccessCode{401} }
+func _200_OK() ErrorCode                         { return ErrorCode{200} }
+func _401_OlderTerm() ErrorCode                  { return ErrorCode{401} }
+func _402_MoreNumOfLogsOfCurrentTerm() ErrorCode { return ErrorCode{402} }
+func _403_UnequalLogsAtMatchIndex() ErrorCode    { return ErrorCode{403} }
