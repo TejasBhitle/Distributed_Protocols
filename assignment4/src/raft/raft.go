@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -73,7 +74,7 @@ type Raft struct {
 
 	//---------------------- fields used for Log Replication by Peers
 	/* actual log */
-	log []*LogItem
+	log *[]LogItem
 
 	/* index where leader / peer will receive next entry from client / leader respectively */
 	nextIndex int
@@ -186,7 +187,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 			// requesting peer is not on the latest term && desires to be leader -> reject
 			reply.VotedInFavour = false
 
-		} else if args.LogsCountInCurrentTerm < getNumOfLogsOfGivenTerm(rf.currentTerm, rf.log) {
+		} else if args.LogsCountInCurrentTerm < getNumOfCommittedLogsForTerm(rf.currentTerm, rf.log) {
 			// for the latest term, peer has more log entries than candidate -> reject
 			reply.VotedInFavour = false
 
@@ -239,11 +240,8 @@ func (rf *Raft) sendAppendEntries(server int, entryRequestArgs EntryRequestArgs,
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := false
 
-	term, isLeader = rf.GetState()
+	term, isLeader := rf.GetState()
 
 	if isLeader {
 		// TODO: write to log
@@ -257,22 +255,15 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		confirmationMap := rf.generateInitialConfirmationStatusMap()
 		confirmationMap[rf.me] = Accepted()
 
-		go func() {
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
+		//go func() {
 
-			// 2. Write to own log [use Critical Section]
-			rf.log = append(rf.log, &logItem)
-			rf.confirmationCountsList = append(rf.confirmationCountsList, confirmationMap)
-			rf.nextIndex++
-
-			// 3. Send replication request to the all other peers
-			//rf.relayToPeerChan <- rf.nextIndex
-		}()
-
+		// 2. Write to own log [use Critical Section]
+		*rf.log = append(*rf.log, logItem)
+		rf.confirmationCountsList = append(rf.confirmationCountsList, confirmationMap)
+		rf.nextIndex++
 	}
 
-	return index, term, isLeader
+	return rf.nextIndex, term, isLeader
 }
 
 // Kill
@@ -308,7 +299,7 @@ func Make(peers []*labrpc.ClientEnd,
 	//rand.Seed(time.Now().UnixNano())
 	rf.receivedVotesCounter = sync.Map{}
 	rf.votedForMap = sync.Map{}
-	rf.log = []*LogItem{}
+	rf.log = &[]LogItem{}
 
 	// Making this channels buffered as a value might be present on this chan when this peer goes down
 	// and new value wont get added to chan when this peer comes up again
@@ -369,7 +360,7 @@ func (rf *Raft) tryTakingLeaderRole() {
 	log := rf.log
 	rf.mu.Unlock()
 
-	logsCount := getNumOfLogsOfGivenTerm(currentTerm, log)
+	logsCount := getNumOfCommittedLogsForTerm(currentTerm, log)
 
 	// 3. request votes from peers
 	//fmt.Printf("tryTakingLeaderRole %v for term %v\n", rf.me, currentTerm)
@@ -505,9 +496,9 @@ func (rf *Raft) getPayloadForPeer(peer int, currentTerm int) *EntryRequestPayloa
 
 	// 1. Get the uncommitted Logs to send to this peer
 	matchIndex := rf.matchIndexesOf[peer]
-	payload.Logs = rf.log[matchIndex:rf.nextIndex]
+	*payload.Logs = (*rf.log)[matchIndex:rf.nextIndex]
 	payload.MatchIndex = matchIndex
-	payload.NumOfLogsOfCurrentTerm = getNumOfLogsOfGivenTerm(currentTerm, rf.log)
+	payload.NumOfCommittedLogsOfCurrentTerm = getNumOfCommittedLogsForTerm(currentTerm, rf.log)
 
 	return &payload
 }
@@ -533,45 +524,88 @@ func (rf *Raft) AppendEntriesOrHeartbeatRPC(args EntryRequestArgs, reply *EntryR
 
 func reconcileLogs(
 	args EntryRequestArgs,
-	peerLog []*LogItem,
-	peerTerm int) ErrorCode {
+	peerLog *[]LogItem,
+	peerTerm int) (int, ErrorCode) {
 
 	leaderLog := args.EntryRequestPayload.Logs
 	leaderTerm := args.LeaderTerm
-	leaderLogsCountOfCurrentTerm := args.EntryRequestPayload.NumOfLogsOfCurrentTerm
+	leaderLogsCountOfCurrentTerm := args.EntryRequestPayload.NumOfCommittedLogsOfCurrentTerm
 	matchIndex := args.EntryRequestPayload.MatchIndex
+	updatedMatchIndex := matchIndex
 
 	if peerTerm > leaderTerm {
 		// reject heartbeat/appendEntries
-		return _401_OlderTerm()
+		return -1, _401_OlderTerm()
 	}
+
+	leaderLogLen := len(*leaderLog)
+	peerLogLen := len(*peerLog)
 
 	// If Payload exists
-	if leaderLog != nil && len(leaderLog) != 0 {
-
-		if leaderLogsCountOfCurrentTerm < getNumOfLogsOfGivenTerm(peerTerm, peerLog) {
+	if leaderLog != nil && leaderLogLen != 0 {
+		if leaderLogsCountOfCurrentTerm < getNumOfCommittedLogsForTerm(peerTerm, peerLog) {
 			// reject
-			return _402_MoreNumOfLogsOfCurrentTerm()
+			return -1, _402_MoreNumOfCommittedLogsOfCurrentTerm()
 		}
 
-		if matchIndex >= len(peerLog) ||
-			leaderLog[matchIndex] != peerLog[matchIndex] {
-
-			// matchIndex log is not matching with leader
-			return _403_UnequalLogsAtMatchIndex()
+		if matchIndex != -1 &&
+			(matchIndex >= peerLogLen ||
+				(0 <= matchIndex && matchIndex < len(*peerLog) && (*leaderLog)[matchIndex] != (*peerLog)[matchIndex])) {
+			// matchIndex log is not matching with leader -> reject
+			return -1, _403_UnequalLogsAtMatchIndex()
 		}
+
+		var startIndex int
+		var endIndex int
+
+		if matchIndex == -1 {
+			// leader is unaware till where its logs match with this peer
+			startIndex = 0
+			endIndex = leaderLogLen
+
+		} else {
+			startIndex = matchIndex + 1
+			endIndex = startIndex + leaderLogLen
+
+		}
+
+		//fmt.Printf("%v %v\n", leaderLogLen, len(*peerLog))
+		//printLog(peerLog)
+		for i := startIndex; i < endIndex; i++ {
+			if i == len(*peerLog) {
+				*peerLog = append(*peerLog, (*leaderLog)[i])
+			} else if i < len(*peerLog) {
+				(*peerLog)[i] = (*leaderLog)[i]
+			} else {
+				// this case shouldnt reach
+				fmt.Printf("[reconcileLogs] unreachable condition reached")
+			}
+
+			if (*leaderLog)[i].IsCommitted {
+				updatedMatchIndex = i
+			}
+		}
+		//printLog(peerLog)
+
+		peerLen := len(*peerLog)
+		if peerLen > leaderLogLen {
+			*peerLog = (*peerLog)[:leaderLogLen]
+		}
+		//printLog(peerLog)
 	}
-	
-	return _200_OK()
+	//fmt.Printf("%v %v\n", len(*leaderLog), len(*peerLog))
+	return updatedMatchIndex, _200_OK()
 }
 
 /* Helper functions */
-func getNumOfLogsOfGivenTerm(currentTerm int, logs []*LogItem) int {
+
+func getNumOfCommittedLogsForTerm(currentTerm int, logs *[]LogItem) int {
 	count := 0
-	logLen := len(logs)
-	for i := logLen - 1; i >= 0; i-- {
-		if logs[i].Term == currentTerm {
-			count++
+	for i := len(*logs) - 1; i >= 0; i-- {
+		if (*logs)[i].Term == currentTerm {
+			if (*logs)[i].IsCommitted {
+				count++
+			}
 		} else {
 			break
 		}
@@ -581,6 +615,31 @@ func getNumOfLogsOfGivenTerm(currentTerm int, logs []*LogItem) int {
 
 func randInt(min int, max int) int {
 	return min + rand.Intn(max-min)
+}
+
+func areLogsEqual(log1 *[]LogItem, log2 *[]LogItem) bool {
+	if len(*log1) != len(*log2) {
+		return false
+	}
+
+	n := len(*log1)
+	for i := 0; i < n; i++ {
+		if (*log1)[i] != (*log2)[i] {
+			//fmt.Printf("areLogsEqual : %v %v\n", (*log1)[i], (*log2)[i])
+			return false
+		}
+	}
+	return true
+}
+
+func getLeaderLogsToSend(leaderLog *[]LogItem, matchIndex int) *[]LogItem {
+	leaderLogToSend := &[]LogItem{}
+	if matchIndex < 0 {
+		*leaderLogToSend = *leaderLog
+	} else {
+		*leaderLogToSend = (*leaderLog)[matchIndex:]
+	}
+	return leaderLogToSend
 }
 
 /* STRUCTS AND ENUMS */
@@ -612,9 +671,9 @@ type EntryRequestReply struct {
 }
 
 type EntryRequestPayload struct {
-	Logs                   []*LogItem
-	MatchIndex             int
-	NumOfLogsOfCurrentTerm int
+	Logs                            *[]LogItem
+	MatchIndex                      int
+	NumOfCommittedLogsOfCurrentTerm int
 }
 
 // ReconciliationResult Enum
@@ -646,7 +705,7 @@ type ErrorCode struct {
 	Code int
 }
 
-func _200_OK() ErrorCode                         { return ErrorCode{200} }
-func _401_OlderTerm() ErrorCode                  { return ErrorCode{401} }
-func _402_MoreNumOfLogsOfCurrentTerm() ErrorCode { return ErrorCode{402} }
-func _403_UnequalLogsAtMatchIndex() ErrorCode    { return ErrorCode{403} }
+func _200_OK() ErrorCode                                  { return ErrorCode{200} }
+func _401_OlderTerm() ErrorCode                           { return ErrorCode{401} }
+func _402_MoreNumOfCommittedLogsOfCurrentTerm() ErrorCode { return ErrorCode{402} }
+func _403_UnequalLogsAtMatchIndex() ErrorCode             { return ErrorCode{403} }
