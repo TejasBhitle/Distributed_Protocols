@@ -146,11 +146,9 @@ func (rf *Raft) readPersist(data []byte) {
 	// d := gob.NewDecoder(r)
 	// d.Decode(&rf.xxx)
 	// d.Decode(&rf.yyy)
-
 	r := bytes.NewBuffer(data)
 	d := gob.NewDecoder(r)
 	d.Decode(&rf.currentTerm)
-
 	rf.votedForMap = sync.Map{}
 	var votedFor int
 	d.Decode(&votedFor)
@@ -160,7 +158,7 @@ func (rf *Raft) readPersist(data []byte) {
 
 	var log []LogItem
 	d.Decode(&log)
-	*rf.log = log
+	rf.log = &log
 }
 
 // example RequestVote RPC arguments structure.
