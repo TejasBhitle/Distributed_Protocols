@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"bytes"
+	"encoding/gob"
 	"fmt"
 	"math/rand"
 	"sync"
@@ -85,7 +87,7 @@ type Raft struct {
 	//---------------------- fields used for Log Replication by Leaders
 
 	/* for tentative & commit conformation */
-	confirmationCountsList []map[int]ConfirmationStatus
+	confirmationCountsMap map[int](map[int]ConfirmationStatus)
 
 	/* match Indexes of peers. [Only applicable when this peer is leader]*/
 	matchIndexesOf map[int]int
@@ -125,14 +127,17 @@ func (rf *Raft) persist() {
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
 
-	// TODO : Note that if using gob.encode, encode zero will get the previous value. It’s a feature not a bug.
-	//w := new(bytes.Buffer)
-	//e := gob.NewEncoder(w)
-	//e.Encode(rf.currentTerm)
-	//e.Encode(rf.votedForMap)
-	//e.Encode(rf.log)
-	//data := w.Bytes()
-	//rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	votedFor, ok := rf.votedForMap.Load(rf.currentTerm)
+	if !ok {
+		votedFor = -1
+	}
+	e.Encode(votedFor)
+	e.Encode(*rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 // restore previously persisted state.
@@ -144,12 +149,20 @@ func (rf *Raft) readPersist(data []byte) {
 	// d.Decode(&rf.xxx)
 	// d.Decode(&rf.yyy)
 
-	// TODO : Note that if using gob.encode, encode zero will get the previous value. It’s a feature not a bug.
-	//r := bytes.NewBuffer(data)
-	//d := gob.NewDecoder(r)
-	//d.Decode(&rf.currentTerm)
-	//d.Decode(&rf.votedForMap)
-	//d.Decode(&rf.log)
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&rf.currentTerm)
+
+	rf.votedForMap = sync.Map{}
+	var votedFor int
+	d.Decode(&votedFor)
+	if votedFor != -1 {
+		rf.votedForMap.Store(rf.currentTerm, votedFor)
+	}
+
+	var log []LogItem
+	d.Decode(&log)
+	*rf.log = log
 }
 
 // example RequestVote RPC arguments structure.
@@ -222,8 +235,39 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 	return ok
 }
 
-func (rf *Raft) sendAppendEntries(server int, entryRequestArgs EntryRequestArgs, entryRequestReply *EntryRequestReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntriesOrHeartbeatRPC", entryRequestArgs, &entryRequestReply)
+func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
+
+	entryRequestArgs := EntryRequestArgs{
+		rf.me,
+		currentTerm,
+		rf.getPayloadForPeer(peerId, currentTerm),
+	}
+	entryRequestReply := EntryRequestReply{}
+
+	ok := rf.peers[peerId].Call("Raft.AppendEntriesOrHeartbeatRPC", entryRequestArgs, &entryRequestReply)
+	if ok {
+		fmt.Printf("[Leader %v][term %v] AppendEntriesRPC Response from %v [errorCode:%v updatedMatchIndex:%v] \n",
+			rf.me, currentTerm, peerId, entryRequestReply.ErrorCode, entryRequestReply.UpdatedMatchIndex)
+
+		switch entryRequestReply.ErrorCode {
+		case _200_OK():
+			rf.matchIndexesOf[peerId] = entryRequestReply.UpdatedMatchIndex
+			break
+
+		case _401_OlderTerm():
+			rf.transitionBackToFollower(rf.currentTerm)
+			break
+
+		case _402_MoreNumOfCommittedLogsOfCurrentTerm():
+			rf.transitionBackToFollower(rf.currentTerm)
+			break
+
+		case _403_UnequalLogsAtMatchIndex():
+			rf.matchIndexesOf[peerId] = -1
+			go rf.sendAppendEntries(peerId, currentTerm)
+			break
+		}
+	}
 	return ok
 }
 
@@ -240,7 +284,7 @@ func (rf *Raft) sendAppendEntries(server int, entryRequestArgs EntryRequestArgs,
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-
+	nextIndex := -1
 	term, isLeader := rf.GetState()
 
 	if isLeader {
@@ -259,11 +303,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 		// 2. Write to own log [use Critical Section]
 		*rf.log = append(*rf.log, logItem)
-		rf.confirmationCountsList = append(rf.confirmationCountsList, confirmationMap)
+		nextIndex = rf.nextIndex
+		rf.confirmationCountsMap[nextIndex] = confirmationMap
 		rf.nextIndex++
 	}
 
-	return rf.nextIndex, term, isLeader
+	return nextIndex, term, isLeader
 }
 
 // Kill
@@ -390,6 +435,10 @@ func (rf *Raft) tryTakingLeaderRole() {
 
 				if requestVoteReply.VotedInFavour {
 					rf.transitionToLeaderIfSufficientVotes(requestVoteReply)
+
+				} else if requestVoteReply.RespondingPeerTerm > currentTerm {
+					// transition back to follower
+					rf.transitionBackToFollower(rf.currentTerm)
 				}
 			}
 		}()
@@ -471,19 +520,10 @@ func (rf *Raft) relayToAllPeers(currentTerm int) {
 			continue
 		}
 
-		entryRequestArgs := EntryRequestArgs{rf.me, currentTerm, rf.getPayloadForPeer(peerIndex, currentTerm)}
-		entryRequestReply := EntryRequestReply{}
-
-		go func(index int, entryRequestArgs EntryRequestArgs, entryRequestReply EntryRequestReply) {
+		go func(index int, currentTerm int) {
 			//fmt.Printf("Leader heartBeat by %v to %v \n", rf.me, peerIndex)
-			ok := rf.sendAppendEntries(index, entryRequestArgs, &entryRequestReply)
-			if ok {
-				// got reply
-				//fmt.Printf("Leader heartBeat got reply from %v\n", peerIndex)
-			} else {
-				//fmt.Printf("Leader heartBeat got error from %v\n", peerIndex)
-			}
-		}(peerIndex, entryRequestArgs, entryRequestReply)
+			rf.sendAppendEntries(index, currentTerm)
+		}(peerIndex, currentTerm)
 
 	}
 }
@@ -506,26 +546,33 @@ func (rf *Raft) getPayloadForPeer(peer int, currentTerm int) *EntryRequestPayloa
 // AppendEntriesOrHeartbeatRPC : PEER receiving the appendEntries or Heartbeat call
 func (rf *Raft) AppendEntriesOrHeartbeatRPC(args EntryRequestArgs, reply *EntryRequestReply) {
 	currentTerm, _ := rf.GetState()
-	reply.Term = currentTerm
+	fmt.Printf("[peer %v][term %v] AppendEntriesRPC received from %v\n", rf.me, currentTerm, args.LeaderId)
 
 	rf.mu.Lock()
-	reconcileLogs(args, rf.log, currentTerm)
+	updatedMatchIndex, errorCode := reconcileLogs(args, rf.log, currentTerm, rf.me)
 	rf.mu.Unlock()
 
-	// HeartBeat logic
-	//fmt.Printf("[Leader %v] heartBeat received by %v\n", args.LeaderId, rf.me)
-	if rf.peerRole != FollowerRole() {
-		rf.peerRole = FollowerRole()
+	fmt.Printf("[peer %v][term %v] reconcileLogs with %v\n -> updatedMatchIndex %v, errorCode %v",
+		rf.me, currentTerm, args.LeaderId, updatedMatchIndex, errorCode.Code)
+	if errorCode == _200_OK() {
+		// HeartBeat logic
+		//fmt.Printf("[Leader %v] heartBeat received by %v\n", args.LeaderId, rf.me)
+		if rf.peerRole != FollowerRole() {
+			rf.peerRole = FollowerRole()
+		}
+		rf.resetElectionTimeoutChan <- true
 	}
-	rf.resetElectionTimeoutChan <- true
 
-	reply.ErrorCode = _200_OK()
+	reply.Term = currentTerm
+	reply.UpdatedMatchIndex = updatedMatchIndex
+	reply.ErrorCode = errorCode
 }
 
 func reconcileLogs(
 	args EntryRequestArgs,
 	peerLog *[]LogItem,
-	peerTerm int) (int, ErrorCode) {
+	peerTerm int,
+	peerId int) (int, ErrorCode) {
 
 	leaderLog := args.EntryRequestPayload.Logs
 	leaderTerm := args.LeaderTerm
@@ -569,8 +616,6 @@ func reconcileLogs(
 
 		}
 
-		//fmt.Printf("%v %v\n", leaderLogLen, len(*peerLog))
-		//printLog(peerLog)
 		for i := startIndex; i < endIndex; i++ {
 			if i == len(*peerLog) {
 				*peerLog = append(*peerLog, (*leaderLog)[i])
@@ -578,23 +623,25 @@ func reconcileLogs(
 				(*peerLog)[i] = (*leaderLog)[i]
 			} else {
 				// this case shouldnt reach
-				fmt.Printf("[reconcileLogs] unreachable condition reached")
+				fmt.Printf("[peer %v][term %v] reconcileLogs unreachable condition reached\n", peerId, peerTerm)
 			}
 
 			if (*leaderLog)[i].IsCommitted {
 				updatedMatchIndex = i
 			}
 		}
-		//printLog(peerLog)
 
 		peerLen := len(*peerLog)
 		if peerLen > leaderLogLen {
 			*peerLog = (*peerLog)[:leaderLogLen]
 		}
-		//printLog(peerLog)
 	}
-	//fmt.Printf("%v %v\n", len(*leaderLog), len(*peerLog))
 	return updatedMatchIndex, _200_OK()
+}
+
+func (rf *Raft) transitionBackToFollower(currentTerm int) {
+	fmt.Printf("[peer %v][term %v] transitionBackToFollower\n", rf.me, currentTerm)
+	rf.UpdateState(currentTerm, FollowerRole())
 }
 
 /* Helper functions */
@@ -666,8 +713,9 @@ type EntryRequestArgs struct {
 }
 
 type EntryRequestReply struct {
-	Term      int
-	ErrorCode ErrorCode
+	Term              int
+	ErrorCode         ErrorCode
+	UpdatedMatchIndex int
 }
 
 type EntryRequestPayload struct {

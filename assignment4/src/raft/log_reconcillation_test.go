@@ -14,7 +14,7 @@ func Test0(t *testing.T) {
 	peerLog := &[]LogItem{}
 
 	numOfLogs := getNumOfCommittedLogsForTerm(0, leaderLog)
-	if numOfLogs != 1 {
+	if numOfLogs != 0 {
 		t.Fatal("numOfLogs mismatch")
 	}
 
@@ -29,7 +29,7 @@ func Test0(t *testing.T) {
 		},
 	}
 
-	updatedMatchIndex, errorCode := reconcileLogs(args, peerLog, 0)
+	updatedMatchIndex, errorCode := reconcileLogs(args, peerLog, 0, 0)
 
 	// assertions
 	if !areLogsEqual(leaderLog, peerLog) {
@@ -72,7 +72,7 @@ func Test1(t *testing.T) {
 		},
 	}
 
-	updatedMatchIndex, errorCode := reconcileLogs(args, peerLog, 0)
+	updatedMatchIndex, errorCode := reconcileLogs(args, peerLog, 0, 0)
 	fmt.Printf("%v %v\n", updatedMatchIndex, errorCode)
 	// assertions
 	if !areLogsEqual(leaderLog, peerLog) {
@@ -115,7 +115,7 @@ func Test2(t *testing.T) {
 		},
 	}
 
-	updatedMatchIndex, errorCode := reconcileLogs(args, peerLog, 0)
+	updatedMatchIndex, errorCode := reconcileLogs(args, peerLog, 0, 0)
 	fmt.Printf("%v %v\n", updatedMatchIndex, errorCode)
 	// assertions
 	if !areLogsEqual(leaderLog, peerLog) {
@@ -159,7 +159,7 @@ func Test3(t *testing.T) {
 		},
 	}
 
-	updatedMatchIndex, errorCode := reconcileLogs(args, peerLog, 0)
+	updatedMatchIndex, errorCode := reconcileLogs(args, peerLog, 0, 0)
 	fmt.Printf("%v %v\n", updatedMatchIndex, errorCode)
 	// assertions
 	if errorCode != _402_MoreNumOfCommittedLogsOfCurrentTerm() {
@@ -201,7 +201,7 @@ func Test4(t *testing.T) {
 		},
 	}
 
-	updatedMatchIndex, errorCode := reconcileLogs(args, peerLog, 1)
+	updatedMatchIndex, errorCode := reconcileLogs(args, peerLog, 1, 0)
 	fmt.Printf("%v %v\n", updatedMatchIndex, errorCode)
 	// assertions
 	if !areLogsEqual(leaderLog, peerLog) {
