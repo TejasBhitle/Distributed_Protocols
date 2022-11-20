@@ -70,9 +70,7 @@ type Raft struct {
 	To be used only when this peer is not a leader */
 	resetElectionTimeoutChan chan bool
 
-	/* send index of the log on this channel to interrupt the heartbeat (this leader will send) in case there are no log replication requests
-	To be used only when this peer is a leader */
-	//relayToPeerChan chan int
+	applyCh chan ApplyMsg
 
 	//---------------------- fields used for Log Replication by Peers
 	/* actual log */
@@ -87,7 +85,7 @@ type Raft struct {
 	//---------------------- fields used for Log Replication by Leaders
 
 	/* for tentative & commit conformation */
-	confirmationCountsMap map[int](map[int]ConfirmationStatus)
+	confirmationStatusMap map[int]ConfirmationStatus
 
 	/* match Indexes of peers. [Only applicable when this peer is leader]*/
 	matchIndexesOf map[int]int
@@ -237,10 +235,22 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 
 func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 
+	payload := EntryRequestPayload{}
+
+	// 1. Get the uncommitted Logs to send to this peer
+	rf.mu.Lock()
+	log := rf.log
+	nextIndex := rf.nextIndex
+	matchIndex := rf.matchIndexesOf[peerId]
+	*payload.Logs = (*log)[matchIndex:nextIndex]
+	payload.MatchIndex = matchIndex
+	payload.NumOfCommittedLogsOfCurrentTerm = getNumOfCommittedLogsForTerm(currentTerm, log)
+	rf.mu.Unlock()
+
 	entryRequestArgs := EntryRequestArgs{
 		rf.me,
 		currentTerm,
-		rf.getPayloadForPeer(peerId, currentTerm),
+		&payload,
 	}
 	entryRequestReply := EntryRequestReply{}
 
@@ -252,6 +262,23 @@ func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 		switch entryRequestReply.ErrorCode {
 		case _200_OK():
 			rf.matchIndexesOf[peerId] = entryRequestReply.UpdatedMatchIndex
+			for i := matchIndex + 1; i <= nextIndex; i++ {
+				if _, ok := rf.confirmationStatusMap[i]; ok {
+					rf.confirmationStatusMap[i] = generateInitialConfirmationStatusMap(len(rf.peers))
+					rf.confirmationStatusMap[i].markStatusAccepted(rf.me)
+				}
+				rf.confirmationStatusMap[i].markStatusAccepted(peerId)
+
+				if rf.confirmationStatusMap[i].acceptedCount > (len(rf.peers)-1)/2 && !(*rf.log)[i].IsCommitted {
+					(*rf.log)[i].IsCommitted = true
+					rf.applyCh <- ApplyMsg{
+						Index:       i,
+						Command:     (*rf.log)[i].Command,
+						UseSnapshot: false,
+						Snapshot:    nil,
+					}
+				}
+			}
 			break
 
 		case _401_OlderTerm():
@@ -288,23 +315,19 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term, isLeader := rf.GetState()
 
 	if isLeader {
-		// TODO: write to log
-
 		// 1. Init the logItem and metadata
 		logItem := LogItem{
 			Command:     command,
 			Term:        term,
 			IsCommitted: false,
 		}
-		confirmationMap := rf.generateInitialConfirmationStatusMap()
-		confirmationMap[rf.me] = Accepted()
-
-		//go func() {
+		confirmationStatus := generateInitialConfirmationStatusMap(len(rf.peers))
+		confirmationStatus.markStatusAccepted(rf.me)
 
 		// 2. Write to own log [use Critical Section]
 		*rf.log = append(*rf.log, logItem)
 		nextIndex = rf.nextIndex
-		rf.confirmationCountsMap[nextIndex] = confirmationMap
+		rf.confirmationStatusMap[nextIndex] = confirmationStatus
 		rf.nextIndex++
 	}
 
@@ -343,19 +366,23 @@ func Make(peers []*labrpc.ClientEnd,
 	// Your initialization code here.
 	//rand.Seed(time.Now().UnixNano())
 	rf.receivedVotesCounter = sync.Map{}
-	rf.votedForMap = sync.Map{}
-	rf.log = &[]LogItem{}
+	rf.applyCh = applyCh
 
 	// Making this channels buffered as a value might be present on this chan when this peer goes down
 	// and new value wont get added to chan when this peer comes up again
 	rf.resetElectionTimeoutChan = make(chan bool, 20)
-	//rf.relayToPeerChan = make(chan int, 20)
 
 	// just started peer, should be a follower with term as 0
 	rf.UpdateState(0, FollowerRole())
 
-	// initialize from state persisted before a crash
-	//rf.readPersist(persister.ReadRaftState())
+	rf.log = &[]LogItem{}
+	//initialize currentTerm, votedForMap, log from state persisted before a crash
+	rf.readPersist(persister.ReadRaftState())
+
+	rf.nextIndex = len(*rf.log)
+	rf.matchIndexesOf = initMatchIndexesOf(len(peers))
+	rf.commitIndex = getNumOfCommittedLogsForTerm(rf.currentTerm, rf.log)
+	rf.confirmationStatusMap = map[int]ConfirmationStatus{}
 
 	rf.startElectionTimeoutBackgroundProcess()
 
@@ -528,21 +555,6 @@ func (rf *Raft) relayToAllPeers(currentTerm int) {
 	}
 }
 
-func (rf *Raft) getPayloadForPeer(peer int, currentTerm int) *EntryRequestPayload {
-	payload := EntryRequestPayload{}
-
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	// 1. Get the uncommitted Logs to send to this peer
-	matchIndex := rf.matchIndexesOf[peer]
-	*payload.Logs = (*rf.log)[matchIndex:rf.nextIndex]
-	payload.MatchIndex = matchIndex
-	payload.NumOfCommittedLogsOfCurrentTerm = getNumOfCommittedLogsForTerm(currentTerm, rf.log)
-
-	return &payload
-}
-
 // AppendEntriesOrHeartbeatRPC : PEER receiving the appendEntries or Heartbeat call
 func (rf *Raft) AppendEntriesOrHeartbeatRPC(args EntryRequestArgs, reply *EntryRequestReply) {
 	currentTerm, _ := rf.GetState()
@@ -689,6 +701,14 @@ func getLeaderLogsToSend(leaderLog *[]LogItem, matchIndex int) *[]LogItem {
 	return leaderLogToSend
 }
 
+func initMatchIndexesOf(peersCount int) map[int]int {
+	matchIndexesOf := map[int]int{}
+	for peerId := 0; peerId < peersCount; peerId++ {
+		matchIndexesOf[peerId] = -1
+	}
+	return matchIndexesOf
+}
+
 /* STRUCTS AND ENUMS */
 
 // PeerRole Enum
@@ -734,19 +754,24 @@ func PeerAccurate() ReconciliationResult   { return ReconciliationResult{1} }
 
 // ConfirmationStatus Enum
 type ConfirmationStatus struct {
-	status int
+	acceptedCount int
+	isAccepted    map[int]bool
 }
 
-func Accepted() ConfirmationStatus   { return ConfirmationStatus{0} }
-func Rejected() ConfirmationStatus   { return ConfirmationStatus{1} }
-func NoResponse() ConfirmationStatus { return ConfirmationStatus{2} }
-
-func (rf *Raft) generateInitialConfirmationStatusMap() map[int]ConfirmationStatus {
-	confirmationMap := map[int]ConfirmationStatus{}
-	for index, _ := range rf.peers {
-		confirmationMap[index] = NoResponse()
+func (confirmationStatus ConfirmationStatus) markStatusAccepted(peerId int) {
+	if !confirmationStatus.isAccepted[peerId] {
+		confirmationStatus.isAccepted[peerId] = true
+		confirmationStatus.acceptedCount++
 	}
-	return confirmationMap
+}
+
+func generateInitialConfirmationStatusMap(peersCount int) ConfirmationStatus {
+	confirmationStatus := ConfirmationStatus{}
+	for peerId := 0; peerId < peersCount; peerId++ {
+		confirmationStatus.isAccepted[peerId] = false
+	}
+	confirmationStatus.acceptedCount = 0
+	return confirmationStatus
 }
 
 type ErrorCode struct {
