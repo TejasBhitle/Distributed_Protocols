@@ -22,7 +22,7 @@ func Test0(t *testing.T) {
 	args := EntryRequestArgs{
 		LeaderId:   0,
 		LeaderTerm: 0,
-		EntryRequestPayload: &EntryRequestPayload{
+		EntryRequestPayload: EntryRequestPayload{
 			Logs:                            getLeaderLogsToSend(leaderLog, matchIndex),
 			MatchIndex:                      matchIndex,
 			NumOfCommittedLogsOfCurrentTerm: numOfLogs,
@@ -65,7 +65,7 @@ func Test1(t *testing.T) {
 	args := EntryRequestArgs{
 		LeaderId:   0,
 		LeaderTerm: 0,
-		EntryRequestPayload: &EntryRequestPayload{
+		EntryRequestPayload: EntryRequestPayload{
 			Logs:                            getLeaderLogsToSend(leaderLog, matchIndex),
 			MatchIndex:                      matchIndex,
 			NumOfCommittedLogsOfCurrentTerm: numOfLogs,
@@ -108,7 +108,7 @@ func Test2(t *testing.T) {
 	args := EntryRequestArgs{
 		LeaderId:   0,
 		LeaderTerm: 0,
-		EntryRequestPayload: &EntryRequestPayload{
+		EntryRequestPayload: EntryRequestPayload{
 			Logs:                            getLeaderLogsToSend(leaderLog, matchIndex),
 			MatchIndex:                      matchIndex,
 			NumOfCommittedLogsOfCurrentTerm: numOfLogs,
@@ -152,7 +152,7 @@ func Test3(t *testing.T) {
 	args := EntryRequestArgs{
 		LeaderId:   0,
 		LeaderTerm: 0,
-		EntryRequestPayload: &EntryRequestPayload{
+		EntryRequestPayload: EntryRequestPayload{
 			Logs:                            getLeaderLogsToSend(leaderLog, matchIndex),
 			MatchIndex:                      matchIndex,
 			NumOfCommittedLogsOfCurrentTerm: numOfLogs,
@@ -194,7 +194,7 @@ func Test4(t *testing.T) {
 	args := EntryRequestArgs{
 		LeaderId:   0,
 		LeaderTerm: 1,
-		EntryRequestPayload: &EntryRequestPayload{
+		EntryRequestPayload: EntryRequestPayload{
 			Logs:                            getLeaderLogsToSend(leaderLog, matchIndex),
 			MatchIndex:                      matchIndex,
 			NumOfCommittedLogsOfCurrentTerm: numOfLogs,

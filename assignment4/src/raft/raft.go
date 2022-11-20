@@ -43,6 +43,8 @@ type ApplyMsg struct {
 // This duration should be less than election timeout duration
 const heartBeatDuration = 100 * time.Millisecond
 
+const debug = false
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex
@@ -164,9 +166,9 @@ func (rf *Raft) readPersist(data []byte) {
 // example RequestVote RPC arguments structure.
 type RequestVoteArgs struct {
 	// Your data here.
-	RequestingPeerId       int
-	RequestingPeerTerm     int
-	LogsCountInCurrentTerm int
+	RequestingPeerId           int
+	RequestingPeerTerm         int
+	CommittedLogsInCurrentTerm int
 }
 
 // example RequestVote RPC reply structure.
@@ -196,10 +198,12 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 			// requesting peer is not on the latest term && desires to be leader -> reject
 			reply.VotedInFavour = false
 
-		} else if args.LogsCountInCurrentTerm < getNumOfCommittedLogsForTerm(rf.currentTerm, rf.log) {
+		} else if args.CommittedLogsInCurrentTerm < getNumOfCommittedLogsForTerm(rf.currentTerm, rf.log) {
 			// for the latest term, peer has more log entries than candidate -> reject
 			reply.VotedInFavour = false
 
+		} else {
+			reply.VotedInFavour = true
 		}
 	}
 
@@ -233,14 +237,19 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 
 func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 
-	payload := EntryRequestPayload{}
+	payload := EntryRequestPayload{
+		Logs: []LogItem{},
+	}
 
 	// 1. Get the uncommitted Logs to send to this peer
 	rf.mu.Lock()
 	log := rf.log
 	nextIndex := rf.nextIndex
 	matchIndex := rf.matchIndexesOf[peerId]
-	*payload.Logs = (*log)[matchIndex:nextIndex]
+	if matchIndex == -1 {
+		matchIndex = 0
+	}
+	payload.Logs = (*log)[matchIndex:nextIndex]
 	payload.MatchIndex = matchIndex
 	payload.NumOfCommittedLogsOfCurrentTerm = getNumOfCommittedLogsForTerm(currentTerm, log)
 	rf.mu.Unlock()
@@ -248,14 +257,18 @@ func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 	entryRequestArgs := EntryRequestArgs{
 		rf.me,
 		currentTerm,
-		&payload,
+		payload,
 	}
 	entryRequestReply := EntryRequestReply{}
-
+	if debug {
+		fmt.Printf("[Leader %v][term %v] sending AppendEntriesRPC to %v] \n", rf.me, currentTerm, peerId)
+	}
 	ok := rf.peers[peerId].Call("Raft.AppendEntriesOrHeartbeatRPC", entryRequestArgs, &entryRequestReply)
 	if ok {
-		fmt.Printf("[Leader %v][term %v] AppendEntriesRPC Response from %v [errorCode:%v updatedMatchIndex:%v] \n",
-			rf.me, currentTerm, peerId, entryRequestReply.ErrorCode, entryRequestReply.UpdatedMatchIndex)
+		if debug {
+			fmt.Printf("[Leader %v][term %v] AppendEntriesRPC Response from %v [errorCode:%v updatedMatchIndex:%v] \n",
+				rf.me, currentTerm, peerId, entryRequestReply.ErrorCode, entryRequestReply.UpdatedMatchIndex)
+		}
 
 		switch entryRequestReply.ErrorCode {
 		case _200_OK():
@@ -433,7 +446,9 @@ func (rf *Raft) tryTakingLeaderRole() {
 	logsCount := getNumOfCommittedLogsForTerm(currentTerm, log)
 
 	// 3. request votes from peers
-	//fmt.Printf("tryTakingLeaderRole %v for term %v\n", rf.me, currentTerm)
+	if debug {
+		fmt.Printf("[Candidate %v][term %v] tryTakingLeaderRole\n", rf.me, currentTerm)
+	}
 	for index, _ := range rf.peers {
 
 		if index == rf.me {
@@ -447,10 +462,13 @@ func (rf *Raft) tryTakingLeaderRole() {
 
 		requestVoteArgs := RequestVoteArgs{rf.me, currentTerm, logsCount}
 		requestVoteReply := RequestVoteReply{}
-		//peer := peer
-		index := index
-		go func() {
+
+		go func(peerId int, requestVoteArgs RequestVoteArgs, requestVoteReply RequestVoteReply) {
 			ok := rf.sendRequestVote(index, requestVoteArgs, &requestVoteReply)
+			if debug {
+				fmt.Printf("[Candidate %v][term %v] tryTakingLeaderRole [response:%v] from %v\n",
+					rf.me, currentTerm, requestVoteReply, index)
+			}
 			if ok {
 				// got vote reply
 				//fmt.Printf("tryTakingLeaderRole %v -> got %v from %v\n", rf.me, requestVoteReply.VotedInFavour, index)
@@ -466,7 +484,7 @@ func (rf *Raft) tryTakingLeaderRole() {
 					rf.transitionBackToFollower(rf.currentTerm)
 				}
 			}
-		}()
+		}(index, requestVoteArgs, requestVoteReply)
 	}
 }
 
@@ -499,10 +517,15 @@ func (rf *Raft) transitionToLeaderIfSufficientVotes(requestVoteReply RequestVote
 
 	if receivedVotes < requiredVotes && receivedVotes > 1 {
 		// insufficient votes
-		//fmt.Printf("insufficient votes %v\n", rf.me)
+		if debug {
+			fmt.Printf("[Candidate %v][term %v] insufficient votes\n", rf.me, rf.currentTerm)
+		}
 		return
 	}
-	//fmt.Printf("TRANSITION To Leader %v for term %v\n", rf.me, rf.currentTerm)
+
+	if debug {
+		fmt.Printf("[Candidate %v][term %v] TRANSITION To Leader\n", rf.me, rf.currentTerm)
+	}
 	// Make current peer leader
 	rf.peerRole = LeaderRole()
 	rf.startPeriodicBroadcastBackgroundProcess()
@@ -556,14 +579,18 @@ func (rf *Raft) relayToAllPeers(currentTerm int) {
 // AppendEntriesOrHeartbeatRPC : PEER receiving the appendEntries or Heartbeat call
 func (rf *Raft) AppendEntriesOrHeartbeatRPC(args EntryRequestArgs, reply *EntryRequestReply) {
 	currentTerm, _ := rf.GetState()
-	fmt.Printf("[peer %v][term %v] AppendEntriesRPC received from %v\n", rf.me, currentTerm, args.LeaderId)
+	if debug {
+		fmt.Printf("[peer %v][term %v] AppendEntriesRPC received from %v\n", rf.me, currentTerm, args.LeaderId)
+	}
 
 	rf.mu.Lock()
 	updatedMatchIndex, errorCode := reconcileLogs(args, rf.log, currentTerm, rf.me)
 	rf.mu.Unlock()
 
-	fmt.Printf("[peer %v][term %v] reconcileLogs with %v\n -> updatedMatchIndex %v, errorCode %v",
-		rf.me, currentTerm, args.LeaderId, updatedMatchIndex, errorCode.Code)
+	if debug {
+		fmt.Printf("[peer %v][term %v] reconcileLogs with %v -> updatedMatchIndex %v, errorCode %v\n",
+			rf.me, currentTerm, args.LeaderId, updatedMatchIndex, errorCode.Code)
+	}
 	if errorCode == _200_OK() {
 		// HeartBeat logic
 		//fmt.Printf("[Leader %v] heartBeat received by %v\n", args.LeaderId, rf.me)
@@ -584,6 +611,8 @@ func reconcileLogs(
 	peerTerm int,
 	peerId int) (int, ErrorCode) {
 
+	//fmt.Printf("[peer %v][term %v] reconcileLogs begin\n", peerId, peerTerm)
+
 	leaderLog := args.EntryRequestPayload.Logs
 	leaderTerm := args.LeaderTerm
 	leaderLogsCountOfCurrentTerm := args.EntryRequestPayload.NumOfCommittedLogsOfCurrentTerm
@@ -592,23 +621,31 @@ func reconcileLogs(
 
 	if peerTerm > leaderTerm {
 		// reject heartbeat/appendEntries
+		//fmt.Printf("[peer %v][term %v] reconcileLogs reject_401\n", peerId, peerTerm)
 		return -1, _401_OlderTerm()
 	}
 
-	leaderLogLen := len(*leaderLog)
+	leaderLogLen := len(leaderLog)
 	peerLogLen := len(*peerLog)
 
 	// If Payload exists
 	if leaderLog != nil && leaderLogLen != 0 {
+		//fmt.Printf("[peer %v][term %v] reconcileLogs payload exists\n", peerId, peerTerm)
 		if leaderLogsCountOfCurrentTerm < getNumOfCommittedLogsForTerm(peerTerm, peerLog) {
 			// reject
+			if debug {
+				fmt.Printf("[peer %v][term %v] reconcileLogs reject_402\n", peerId, peerTerm)
+			}
 			return -1, _402_MoreNumOfCommittedLogsOfCurrentTerm()
 		}
 
 		if matchIndex != -1 &&
 			(matchIndex >= peerLogLen ||
-				(0 <= matchIndex && matchIndex < len(*peerLog) && (*leaderLog)[matchIndex] != (*peerLog)[matchIndex])) {
+				(0 <= matchIndex && matchIndex < len(*peerLog) && (leaderLog)[matchIndex] != (*peerLog)[matchIndex])) {
 			// matchIndex log is not matching with leader -> reject
+			if debug {
+				fmt.Printf("[peer %v][term %v] reconcileLogs reject_403\n", peerId, peerTerm)
+			}
 			return -1, _403_UnequalLogsAtMatchIndex()
 		}
 
@@ -625,32 +662,38 @@ func reconcileLogs(
 			endIndex = startIndex + leaderLogLen
 
 		}
-
+		//fmt.Printf("[peer %v][term %v] reconcileLogs reconcilling\n", peerId, peerTerm)
 		for i := startIndex; i < endIndex; i++ {
 			if i == len(*peerLog) {
-				*peerLog = append(*peerLog, (*leaderLog)[i])
+				*peerLog = append(*peerLog, (leaderLog)[i])
 			} else if i < len(*peerLog) {
-				(*peerLog)[i] = (*leaderLog)[i]
+				(*peerLog)[i] = (leaderLog)[i]
 			} else {
 				// this case shouldnt reach
-				fmt.Printf("[peer %v][term %v] reconcileLogs unreachable condition reached\n", peerId, peerTerm)
+				if debug {
+					fmt.Printf("[peer %v][term %v] reconcileLogs unreachable condition reached\n", peerId, peerTerm)
+				}
 			}
 
-			if (*leaderLog)[i].IsCommitted {
+			if (leaderLog)[i].IsCommitted {
 				updatedMatchIndex = i
 			}
 		}
+		//fmt.Printf("[peer %v][term %v] reconcileLogs reconcilling part1 done\n", peerId, peerTerm)
 
 		peerLen := len(*peerLog)
 		if peerLen > leaderLogLen {
 			*peerLog = (*peerLog)[:leaderLogLen]
 		}
+		//fmt.Printf("[peer %v][term %v] reconcileLogs reconcilling part2 done\n", peerId, peerTerm)
 	}
 	return updatedMatchIndex, _200_OK()
 }
 
 func (rf *Raft) transitionBackToFollower(currentTerm int) {
-	fmt.Printf("[peer %v][term %v] transitionBackToFollower\n", rf.me, currentTerm)
+	if debug {
+		fmt.Printf("[peer %v][term %v] transitionBackToFollower\n", rf.me, currentTerm)
+	}
 	rf.UpdateState(currentTerm, FollowerRole())
 }
 
@@ -689,12 +732,12 @@ func areLogsEqual(log1 *[]LogItem, log2 *[]LogItem) bool {
 	return true
 }
 
-func getLeaderLogsToSend(leaderLog *[]LogItem, matchIndex int) *[]LogItem {
-	leaderLogToSend := &[]LogItem{}
+func getLeaderLogsToSend(leaderLog *[]LogItem, matchIndex int) []LogItem {
+	leaderLogToSend := []LogItem{}
 	if matchIndex < 0 {
-		*leaderLogToSend = *leaderLog
+		leaderLogToSend = *leaderLog
 	} else {
-		*leaderLogToSend = (*leaderLog)[matchIndex:]
+		leaderLogToSend = (*leaderLog)[matchIndex:]
 	}
 	return leaderLogToSend
 }
@@ -727,7 +770,7 @@ type LogItem struct {
 type EntryRequestArgs struct {
 	LeaderId            int
 	LeaderTerm          int
-	EntryRequestPayload *EntryRequestPayload
+	EntryRequestPayload EntryRequestPayload
 }
 
 type EntryRequestReply struct {
@@ -737,7 +780,7 @@ type EntryRequestReply struct {
 }
 
 type EntryRequestPayload struct {
-	Logs                            *[]LogItem
+	Logs                            []LogItem
 	MatchIndex                      int
 	NumOfCommittedLogsOfCurrentTerm int
 }
