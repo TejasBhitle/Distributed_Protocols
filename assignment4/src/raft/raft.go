@@ -107,9 +107,6 @@ func (rf *Raft) GetState() (int, bool) {
 }
 
 func (rf *Raft) UpdateState(newTerm int, newRole PeerRole) {
-	//rf.mu.Lock()
-	//defer rf.mu.Unlock()
-
 	rf.currentTerm = newTerm
 	rf.peerRole = newRole
 }
@@ -211,8 +208,10 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		rf.UpdateState(args.RequestingPeerTerm, FollowerRole())
 		rf.resetElectionTimeoutChan <- true
 	}
-
-	//fmt.Printf("[RequestVote by %v for term %v] [voted %v by %v ] \n", args.RequestingPeerId, args.RequestingPeerTerm, voteDecision, rf.me)
+	if debug {
+		fmt.Printf("[Peer %v][term %v] RequestVote voted %v to %v] \n",
+			rf.me, rf.currentTerm, reply.VotedInFavour, args.RequestingPeerId)
+	}
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -419,6 +418,9 @@ func (rf *Raft) startElectionTimeoutBackgroundProcess() {
 			select {
 			case <-timeoutChan:
 				if rf.peerRole.role != LeaderRole().role {
+					if debug {
+						fmt.Printf("[Peer %v][term %v] timed out..........\n", rf.me, rf.currentTerm)
+					}
 					rf.tryTakingLeaderRole()
 				}
 				break
@@ -463,12 +465,13 @@ func (rf *Raft) tryTakingLeaderRole() {
 		requestVoteArgs := RequestVoteArgs{rf.me, currentTerm, logsCount}
 		requestVoteReply := RequestVoteReply{}
 
+		index := index
 		go func(peerId int, requestVoteArgs RequestVoteArgs, requestVoteReply RequestVoteReply) {
 			ok := rf.sendRequestVote(index, requestVoteArgs, &requestVoteReply)
-			if debug {
-				fmt.Printf("[Candidate %v][term %v] tryTakingLeaderRole [response:%v] from %v\n",
-					rf.me, currentTerm, requestVoteReply, index)
-			}
+			//if debug {
+			//	fmt.Printf("[Candidate %v][term %v] tryTakingLeaderRole [response:%v] from %v\n",
+			//		rf.me, currentTerm, requestVoteReply, index)
+			//}
 			if ok {
 				// got vote reply
 				//fmt.Printf("tryTakingLeaderRole %v -> got %v from %v\n", rf.me, requestVoteReply.VotedInFavour, index)
@@ -515,7 +518,7 @@ func (rf *Raft) transitionToLeaderIfSufficientVotes(requestVoteReply RequestVote
 		return true
 	})
 
-	if receivedVotes < requiredVotes && receivedVotes > 1 {
+	if receivedVotes < requiredVotes {
 		// insufficient votes
 		if debug {
 			fmt.Printf("[Candidate %v][term %v] insufficient votes\n", rf.me, rf.currentTerm)
@@ -523,12 +526,14 @@ func (rf *Raft) transitionToLeaderIfSufficientVotes(requestVoteReply RequestVote
 		return
 	}
 
-	if debug {
-		fmt.Printf("[Candidate %v][term %v] TRANSITION To Leader\n", rf.me, rf.currentTerm)
+	if receivedVotes > 1 {
+		if debug {
+			fmt.Printf("[Candidate %v][term %v] TRANSITION To Leader\n", rf.me, rf.currentTerm)
+		}
+		// Make current peer leader
+		rf.peerRole = LeaderRole()
+		rf.startPeriodicBroadcastBackgroundProcess()
 	}
-	// Make current peer leader
-	rf.peerRole = LeaderRole()
-	rf.startPeriodicBroadcastBackgroundProcess()
 }
 
 // When Peer is leader
@@ -587,10 +592,6 @@ func (rf *Raft) AppendEntriesOrHeartbeatRPC(args EntryRequestArgs, reply *EntryR
 	updatedMatchIndex, errorCode := reconcileLogs(args, rf.log, currentTerm, rf.me)
 	rf.mu.Unlock()
 
-	if debug {
-		fmt.Printf("[peer %v][term %v] reconcileLogs with %v -> updatedMatchIndex %v, errorCode %v\n",
-			rf.me, currentTerm, args.LeaderId, updatedMatchIndex, errorCode.Code)
-	}
 	if errorCode == _200_OK() {
 		// HeartBeat logic
 		//fmt.Printf("[Leader %v] heartBeat received by %v\n", args.LeaderId, rf.me)
