@@ -237,26 +237,32 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 
 func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 
-	payload := EntryRequestPayload{
-		Logs: []LogItem{},
-	}
-
 	// 1. Get the uncommitted Logs to send to this peer
 	rf.mu.Lock()
-	log := rf.log
-	nextIndex := rf.nextIndex
+
 	matchIndex := rf.matchIndexesOf[peerId]
-	payload.MatchIndex = matchIndex
-	startIndex := matchIndex
-	if startIndex == -1 {
-		startIndex = 0
-	}
-	payload.Logs = (*log)[startIndex:nextIndex]
-	if debug {
-		fmt.Printf("[Leader %v][term %v] sendAppendEntries %v [%v:%v]\n", rf.me, currentTerm, payload.Logs, startIndex, nextIndex)
+	nextIndex := rf.nextIndex
+
+	var logsToReplicate []LogItem
+	var logItemAtMatchIndex LogItem
+	if matchIndex == -1 {
+		logsToReplicate = *rf.log
+		logItemAtMatchIndex = LogItem{} // dummy
+
+	} else {
+		logsToReplicate = (*rf.log)[matchIndex+1 : nextIndex]
+		logItemAtMatchIndex = (*rf.log)[matchIndex]
 	}
 
-	payload.NumOfCommittedLogsOfCurrentTerm = getNumOfCommittedLogsForTerm(currentTerm, log)
+	payload := EntryRequestPayload{
+		LogsToReplicate:                 logsToReplicate,
+		MatchIndex:                      matchIndex,
+		LogItemAtMatchIndex:             logItemAtMatchIndex,
+		NumOfCommittedLogsOfCurrentTerm: getNumOfCommittedLogsForTerm(currentTerm, rf.log),
+	}
+	//if debug {
+	//	fmt.Printf("[Leader %v][term %v] sendAppendEntries %v [%v:%v]\n", rf.me, currentTerm, payload.Logs, startIndex, nextIndex)
+	//}
 	rf.mu.Unlock()
 
 	entryRequestArgs := EntryRequestArgs{
@@ -284,7 +290,8 @@ func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 
 				rf.markConfirmationStatusAccepted(i, peerId)
 				if debug {
-					fmt.Printf("[Leader %v][term %v] marking Accepted of %v by %v [acceptedCount:%v] \n", rf.me, currentTerm, i, peerId, rf.confirmationStatusMap[i].acceptedCount)
+					fmt.Printf("[Leader %v][term %v] marking Accepted of %v by %v [acceptedCount:%v] \n",
+						rf.me, currentTerm, i, peerId, rf.confirmationStatusMap[i].acceptedCount)
 				}
 				if rf.confirmationStatusMap[i].acceptedCount > (len(rf.peers)-1)/2 && !(*rf.log)[i].IsCommitted {
 
@@ -631,10 +638,11 @@ func reconcileLogs(
 
 	//fmt.Printf("[peer %v][term %v] reconcileLogs begin\n", peerId, peerTerm)
 
-	leaderLog := args.EntryRequestPayload.Logs
+	leaderLogsToReplicate := args.EntryRequestPayload.LogsToReplicate
 	leaderTerm := args.LeaderTerm
 	leaderLogsCountOfCurrentTerm := args.EntryRequestPayload.NumOfCommittedLogsOfCurrentTerm
 	matchIndex := args.EntryRequestPayload.MatchIndex
+	logItemAtMatchIndex := args.EntryRequestPayload.LogItemAtMatchIndex
 	updatedMatchIndex := matchIndex
 
 	if peerTerm > leaderTerm {
@@ -643,11 +651,10 @@ func reconcileLogs(
 		return -1, _401_OlderTerm()
 	}
 
-	leaderLogLen := len(leaderLog)
-	peerLogLen := len(*peerLog)
+	leaderLogLen := len(leaderLogsToReplicate)
 
 	// If Payload exists
-	if leaderLog != nil && leaderLogLen != 0 {
+	if leaderLogsToReplicate != nil && leaderLogLen != 0 {
 		//fmt.Printf("[peer %v][term %v] reconcileLogs payload exists\n", peerId, peerTerm)
 		if leaderLogsCountOfCurrentTerm < getNumOfCommittedLogsForTerm(peerTerm, peerLog) {
 			// reject
@@ -658,61 +665,43 @@ func reconcileLogs(
 		}
 
 		if matchIndex != -1 &&
-			(matchIndex >= peerLogLen ||
-				(0 <= matchIndex && matchIndex < len(*peerLog) && (leaderLog)[matchIndex] != (*peerLog)[matchIndex])) {
+			(matchIndex >= len(*peerLog) ||
+				(0 <= matchIndex && matchIndex < len(*peerLog) && logItemAtMatchIndex != (*peerLog)[matchIndex])) {
 			// matchIndex log is not matching with leader -> reject
 			if debug {
 				fmt.Printf("[peer %v][term %v] reconcileLogs reject_403 [matchIndex:%v]\n", peerId, peerTerm, matchIndex)
-				printLog(leaderLog, "leaderLog")
-				printLog(*peerLog, "peerLog")
+				//printLog(leaderLog, "leaderLog")
+				//printLog(*peerLog, "peerLog")
 			}
 			return -1, _403_UnequalLogsAtMatchIndex()
 		}
 
-		var startIndex int
-		var endIndex int
+		for i := 0; i < len(leaderLogsToReplicate); i++ {
+			peerIndex := matchIndex + 1 + i
+			if peerIndex == len(*peerLog) {
+				*peerLog = append(*peerLog, leaderLogsToReplicate[i])
 
-		if matchIndex == -1 {
-			// leader is unaware till where its logs match with this peer
-			startIndex = 0
-			endIndex = leaderLogLen
+			} else if peerIndex < len(*peerLog) {
+				(*peerLog)[peerIndex] = leaderLogsToReplicate[i]
 
-		} else {
-			startIndex = matchIndex + 1
-			endIndex = matchIndex + leaderLogLen
-
-		}
-
-		for i := startIndex; i < endIndex; i++ {
-			if i == len(*peerLog) {
-				if debug {
-					fmt.Printf("DEBUG [peer %v][term %v] [matchIndex:%v] [endIndex:%v] [leaderLogLen:%v] [peerLogLen:%v]\n",
-						peerId, peerTerm, matchIndex, endIndex, leaderLogLen, peerLogLen)
-				}
-				*peerLog = append(*peerLog, (leaderLog)[i])
-			} else if i < len(*peerLog) {
-				(*peerLog)[i] = (leaderLog)[i]
 			} else {
-				// this case shouldnt reach
+				// peerIndex > peerLogLen
+				// this case shouldn't reach
 				if debug {
 					fmt.Printf("[peer %v][term %v] reconcileLogs unreachable condition reached\n", peerId, peerTerm)
 				}
 			}
 
-			if (leaderLog)[i].IsCommitted {
+			if (leaderLogsToReplicate)[i].IsCommitted {
 				if debug {
 					fmt.Printf("[peer %v][term %v] reconcileLogs: peer committing %v \n", peerId, peerTerm, i)
 				}
-				updatedMatchIndex = i
+				updatedMatchIndex = peerIndex
 			}
 		}
-		//fmt.Printf("[peer %v][term %v] reconcileLogs reconcilling part1 done\n", peerId, peerTerm)
 
-		peerLen := len(*peerLog)
-		if peerLen > leaderLogLen {
-			*peerLog = (*peerLog)[:leaderLogLen]
-		}
-		//fmt.Printf("[peer %v][term %v] reconcileLogs reconcilling part2 done\n", peerId, peerTerm)
+		// TODO : check indexes
+		*peerLog = (*peerLog)[:matchIndex+leaderLogLen]
 	}
 	return updatedMatchIndex, _200_OK()
 }
@@ -759,18 +748,18 @@ func areLogsEqual(log1 *[]LogItem, log2 *[]LogItem) bool {
 	return true
 }
 
-func getLeaderLogsToSend(leaderLog *[]LogItem, matchIndex int) []LogItem {
-	leaderLogToSend := []LogItem{}
-	if matchIndex < 0 {
-		leaderLogToSend = *leaderLog
-	} else {
-		leaderLogToSend = (*leaderLog)[matchIndex:]
-		if len(leaderLogToSend) == 1 {
-			leaderLogToSend = []LogItem{}
-		}
-	}
-	return leaderLogToSend
-}
+//func getLeaderLogsToSend(leaderLog *[]LogItem, matchIndex int) []LogItem {
+//	leaderLogToSend := []LogItem{}
+//	if matchIndex < 0 {
+//		leaderLogToSend = *leaderLog
+//	} else {
+//		leaderLogToSend = (*leaderLog)[matchIndex:]
+//		if len(leaderLogToSend) == 1 {
+//			leaderLogToSend = []LogItem{}
+//		}
+//	}
+//	return leaderLogToSend
+//}
 
 func initMatchIndexesOf(peersCount int) map[int]int {
 	matchIndexesOf := map[int]int{}
@@ -820,8 +809,9 @@ type EntryRequestReply struct {
 }
 
 type EntryRequestPayload struct {
-	Logs                            []LogItem
+	LogsToReplicate                 []LogItem
 	MatchIndex                      int
+	LogItemAtMatchIndex             LogItem
 	NumOfCommittedLogsOfCurrentTerm int
 }
 
