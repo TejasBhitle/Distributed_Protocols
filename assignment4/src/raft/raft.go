@@ -279,13 +279,13 @@ func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 		for i := matchIndex + 1; i < nextIndex; i++ {
 
 			rf.markConfirmationStatusAccepted(i, peerId)
-			debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] marking Accepted of %v by %v [acceptedCount:%v] \n",
-				rf.me, currentTerm, i, peerId, rf.confirmationStatusMap[i].acceptedCount))
+			debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] marking Accepted of [%v] at index %v by %v [acceptedCount:%v] \n",
+				rf.me, currentTerm, (*rf.log)[i].Command, i, peerId, rf.confirmationStatusMap[i].acceptedCount))
 
 			rf.mu.Lock()
 			if rf.confirmationStatusMap[i].acceptedCount > (len(rf.peers)-1)/2 && !(*rf.log)[i].IsCommitted {
 
-				debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] Leader Committing %v \n", rf.me, currentTerm, i))
+				debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] Leader Committing [%v] at index:%v \n", rf.me, currentTerm, (*rf.log)[i].Command, i))
 				(*rf.log)[i].IsCommitted = true
 				rf.notifyCommit(i)
 
@@ -329,6 +329,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	nextIndex := -1
 	term, isLeader := rf.GetState()
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	if isLeader {
 		// 1. Init the logItem and metadata
 		logItem := LogItem{
@@ -343,12 +346,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		nextIndex = rf.nextIndex
 		rf.confirmationStatusMap[nextIndex] = confirmationStatus
 		rf.nextIndex++
-
-		debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] Start : cmd %v saved at %v [cs %v]\n", rf.me, rf.currentTerm, command, nextIndex, confirmationStatus))
-
+		debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] Start : cmd %v saved at %v [cs %v]\n",
+			rf.me, rf.currentTerm, command, nextIndex, confirmationStatus))
 	}
 
-	return nextIndex, term, isLeader
+	return nextIndex + 1, term, isLeader
 }
 
 // Kill
@@ -668,7 +670,7 @@ func (rf *Raft) reconcileLogs(
 			}
 
 			if (leaderLogsToReplicate)[i].IsCommitted {
-				debugLog(peerId, fmt.Sprintf("[peer %v][term %v] reconcileLogs: peer committing %v \n", peerId, peerTerm, i))
+				debugLog(peerId, fmt.Sprintf("[peer %v][term %v] reconcileLogs: peer committing [%v] at index:%v \n", peerId, peerTerm, (leaderLogsToReplicate)[i].Command, peerIndex))
 				rf.notifyCommit(peerIndex)
 				updatedMatchIndex = peerIndex
 			}
@@ -776,7 +778,7 @@ func (rf *Raft) notifyCommit(index int) {
 		Snapshot:    nil,
 	}
 	debugLog(rf.me, fmt.Sprintf("[Peer %v][term %v] commit notified %v %v\n",
-		rf.me, rf.currentTerm, index, (*rf.log)[index].Command))
+		rf.me, rf.currentTerm, index+1, (*rf.log)[index].Command))
 }
 
 func printLog(log []LogItem, name string) {

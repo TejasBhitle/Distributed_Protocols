@@ -90,7 +90,7 @@ func TestBasicAgree(t *testing.T) {
 
 	fmt.Println("Test: basic agreement...")
 
-	iters := 1
+	iters := 3
 	for index := 1; index < iters+1; index++ {
 		nd, _ := cfg.nCommitted(index)
 		if nd > 0 {
@@ -99,8 +99,9 @@ func TestBasicAgree(t *testing.T) {
 
 		xindex := cfg.one(index*100, servers)
 		if xindex != index {
-			t.Fatalf("got index %v but expected %v\n", xindex, index)
+			t.Fatalf("got index %v but expected %v for cmd %v\n", xindex, index, index*100)
 		}
+		//fmt.Printf("passed for %v\n", index)
 	}
 
 	fmt.Println("... Passed")

@@ -394,7 +394,7 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 			if rf != nil {
 				index1, _, ok := rf.Start(cmd)
 				if ok {
-					//fmt.Printf("Chosen============ %v as index\n", index1)
+					//fmt.Printf("leader will save [%v] at index:%v\n", cmd, index1)
 					index = index1
 					break
 				}
