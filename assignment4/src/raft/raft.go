@@ -21,7 +21,10 @@ import (
 	"bytes"
 	"encoding/gob"
 	"fmt"
+	"log"
 	"math/rand"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -42,8 +45,6 @@ type ApplyMsg struct {
 
 // This duration should be less than election timeout duration
 const heartBeatDuration = 100 * time.Millisecond
-
-const debug = true
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
@@ -73,6 +74,8 @@ type Raft struct {
 	resetElectionTimeoutChan chan bool
 
 	applyCh chan ApplyMsg
+
+	transitionLeaderMu sync.Mutex
 
 	//---------------------- fields used for Log Replication by Peers
 	/* actual log */
@@ -209,10 +212,8 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		rf.UpdateState(args.RequestingPeerTerm, FollowerRole())
 		rf.resetElectionTimeoutChan <- true
 	}
-	if debug {
-		fmt.Printf("[Peer %v][term %v] RequestVote voted %v to %v] \n",
-			rf.me, rf.currentTerm, reply.VotedInFavour, args.RequestingPeerId)
-	}
+	debugLog(rf.me, fmt.Sprintf("[Peer %v][term %v] RequestVote voted %v to %v] \n", rf.me, rf.currentTerm, reply.VotedInFavour, args.RequestingPeerId))
+
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -243,16 +244,7 @@ func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 	matchIndex := rf.matchIndexesOf[peerId]
 	nextIndex := rf.nextIndex
 
-	var logsToReplicate []LogItem
-	var logItemAtMatchIndex LogItem
-	if matchIndex == -1 {
-		logsToReplicate = *rf.log
-		logItemAtMatchIndex = LogItem{} // dummy
-
-	} else {
-		logsToReplicate = (*rf.log)[matchIndex+1 : nextIndex]
-		logItemAtMatchIndex = (*rf.log)[matchIndex]
-	}
+	logsToReplicate, logItemAtMatchIndex := getLogsToSend(rf.log, matchIndex, nextIndex)
 
 	payload := EntryRequestPayload{
 		LogsToReplicate:                 logsToReplicate,
@@ -271,60 +263,52 @@ func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 		payload,
 	}
 	entryRequestReply := EntryRequestReply{}
-	if debug {
-		fmt.Printf("[Leader %v][term %v] sending AppendEntriesRPC to %v] \n", rf.me, currentTerm, peerId)
-	}
+	debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] sending AppendEntriesRPC to %v] payload[%v]\n", rf.me, currentTerm, peerId, payload))
+
 	ok := rf.peers[peerId].Call("Raft.AppendEntriesOrHeartbeatRPC", entryRequestArgs, &entryRequestReply)
 	if ok {
-		if debug {
-			fmt.Printf("[Leader %v][term %v] AppendEntriesRPC Response from %v [errorCode:%v updatedMatchIndex:%v] \n",
-				rf.me, currentTerm, peerId, entryRequestReply.ErrorCode, entryRequestReply.UpdatedMatchIndex)
-		}
+		debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] AppendEntriesRPC Response from %v [errorCode:%v updatedMatchIndex:%v] \n",
+			rf.me, currentTerm, peerId, entryRequestReply.ErrorCode, entryRequestReply.UpdatedMatchIndex))
+	}
 
-		switch entryRequestReply.ErrorCode {
-		case _200_OK():
+	switch entryRequestReply.ErrorCode {
+	case _200_OK():
+		rf.mu.Lock()
+		rf.matchIndexesOf[peerId] = entryRequestReply.UpdatedMatchIndex
+		rf.mu.Unlock()
+		for i := matchIndex + 1; i < nextIndex; i++ {
+
+			rf.markConfirmationStatusAccepted(i, peerId)
+			debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] marking Accepted of %v by %v [acceptedCount:%v] \n",
+				rf.me, currentTerm, i, peerId, rf.confirmationStatusMap[i].acceptedCount))
+
 			rf.mu.Lock()
-			rf.matchIndexesOf[peerId] = entryRequestReply.UpdatedMatchIndex
-			rf.mu.Unlock()
-			for i := matchIndex + 1; i < nextIndex; i++ {
+			if rf.confirmationStatusMap[i].acceptedCount > (len(rf.peers)-1)/2 && !(*rf.log)[i].IsCommitted {
 
-				rf.markConfirmationStatusAccepted(i, peerId)
-				if debug {
-					fmt.Printf("[Leader %v][term %v] marking Accepted of %v by %v [acceptedCount:%v] \n",
-						rf.me, currentTerm, i, peerId, rf.confirmationStatusMap[i].acceptedCount)
-				}
-				if rf.confirmationStatusMap[i].acceptedCount > (len(rf.peers)-1)/2 && !(*rf.log)[i].IsCommitted {
+				debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] Leader Committing %v \n", rf.me, currentTerm, i))
+				(*rf.log)[i].IsCommitted = true
+				rf.notifyCommit(i)
 
-					if debug {
-						fmt.Printf("[Leader %v][term %v] Leader Committing %v \n", rf.me, currentTerm, i)
-					}
-
-					(*rf.log)[i].IsCommitted = true
-					rf.applyCh <- ApplyMsg{
-						Index:       i,
-						Command:     (*rf.log)[i].Command,
-						UseSnapshot: false,
-						Snapshot:    nil,
-					}
-				}
 			}
-			break
-
-		case _401_OlderTerm():
-			rf.transitionBackToFollower(rf.currentTerm)
-			break
-
-		case _402_MoreNumOfCommittedLogsOfCurrentTerm():
-			rf.transitionBackToFollower(rf.currentTerm)
-			break
-
-		case _403_UnequalLogsAtMatchIndex():
-			rf.mu.Lock()
-			rf.matchIndexesOf[peerId] = -1
 			rf.mu.Unlock()
-			go rf.sendAppendEntries(peerId, currentTerm)
-			break
 		}
+		break
+
+	case _401_OlderTerm():
+		rf.transitionBackToFollower(rf.currentTerm)
+		break
+
+	case _402_MoreNumOfCommittedLogsOfCurrentTerm():
+		rf.transitionBackToFollower(rf.currentTerm)
+		break
+
+	case _403_UnequalLogsAtMatchIndex():
+		rf.mu.Lock()
+		rf.matchIndexesOf[peerId] = -1
+		rf.mu.Unlock()
+		go rf.sendAppendEntries(peerId, currentTerm)
+		break
+
 	}
 	return ok
 }
@@ -360,9 +344,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.confirmationStatusMap[nextIndex] = confirmationStatus
 		rf.nextIndex++
 
-		if debug {
-			fmt.Printf("[Leader %v][term %v] Start : cmd saved at %v [cs %v]\n", rf.me, rf.currentTerm, nextIndex, confirmationStatus)
-		}
+		debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] Start : cmd %v saved at %v [cs %v]\n", rf.me, rf.currentTerm, command, nextIndex, confirmationStatus))
+
 	}
 
 	return nextIndex, term, isLeader
@@ -442,9 +425,7 @@ func (rf *Raft) startElectionTimeoutBackgroundProcess() {
 			select {
 			case <-timeoutChan:
 				if rf.peerRole.role != LeaderRole().role {
-					if debug {
-						fmt.Printf("[Peer %v][term %v] timed out..........\n", rf.me, rf.currentTerm)
-					}
+					debugLog(rf.me, fmt.Sprintf("[Peer %v][term %v] timed out..........\n", rf.me, rf.currentTerm))
 					rf.tryTakingLeaderRole()
 				}
 				break
@@ -458,7 +439,6 @@ func (rf *Raft) startElectionTimeoutBackgroundProcess() {
 }
 
 func (rf *Raft) tryTakingLeaderRole() {
-
 	// 1. switch to candidate role if not in that role already
 	// 2. increment the term
 	currentTerm, _ := rf.GetState()
@@ -466,15 +446,14 @@ func (rf *Raft) tryTakingLeaderRole() {
 	rf.UpdateState(currentTerm, CandidateRole())
 
 	rf.mu.Lock()
-	log := rf.log
+	_log := rf.log
 	rf.mu.Unlock()
 
-	logsCount := getNumOfCommittedLogsForTerm(currentTerm, log)
+	logsCount := getNumOfCommittedLogsForTerm(currentTerm, _log)
 
 	// 3. request votes from peers
-	if debug {
-		fmt.Printf("[Candidate %v][term %v] tryTakingLeaderRole\n", rf.me, currentTerm)
-	}
+	debugLog(rf.me, fmt.Sprintf("[Candidate %v][term %v] tryTakingLeaderRole\n", rf.me, currentTerm))
+
 	for index, _ := range rf.peers {
 
 		if index == rf.me {
@@ -516,6 +495,9 @@ func (rf *Raft) tryTakingLeaderRole() {
 }
 
 func (rf *Raft) transitionToLeaderIfSufficientVotes(requestVoteReply RequestVoteReply) {
+	rf.transitionLeaderMu.Lock()
+	defer rf.transitionLeaderMu.Unlock()
+
 	respondingPeerTerm := requestVoteReply.RespondingPeerTerm
 
 	if rf.peerRole.role == LeaderRole().role {
@@ -544,16 +526,13 @@ func (rf *Raft) transitionToLeaderIfSufficientVotes(requestVoteReply RequestVote
 
 	if receivedVotes < requiredVotes {
 		// insufficient votes
-		if debug {
-			fmt.Printf("[Candidate %v][term %v] insufficient votes\n", rf.me, rf.currentTerm)
-		}
+		debugLog(rf.me, fmt.Sprintf("[Candidate %v][term %v] insufficient votes\n", rf.me, rf.currentTerm))
+
 		return
 	}
 
 	if receivedVotes > 1 && rf.peerRole != LeaderRole() {
-		if debug {
-			fmt.Printf("[Candidate %v][term %v] TRANSITION To Leader\n", rf.me, rf.currentTerm)
-		}
+		debugLog(rf.me, fmt.Sprintf("[Candidate %v][term %v] TRANSITION To Leader\n", rf.me, rf.currentTerm))
 		// Make current peer leader
 		rf.peerRole = LeaderRole()
 		rf.startPeriodicBroadcastBackgroundProcess()
@@ -608,12 +587,10 @@ func (rf *Raft) relayToAllPeers(currentTerm int) {
 // AppendEntriesOrHeartbeatRPC : PEER receiving the appendEntries or Heartbeat call
 func (rf *Raft) AppendEntriesOrHeartbeatRPC(args EntryRequestArgs, reply *EntryRequestReply) {
 	currentTerm, _ := rf.GetState()
-	if debug {
-		fmt.Printf("[peer %v][term %v] AppendEntriesRPC received from %v data[%v]\n", rf.me, currentTerm, args.LeaderId, args.EntryRequestPayload)
-	}
+	debugLog(rf.me, fmt.Sprintf("[peer %v][term %v] AppendEntriesRPC received from %v data[%v]\n", rf.me, currentTerm, args.LeaderId, args.EntryRequestPayload))
 
 	rf.mu.Lock()
-	updatedMatchIndex, errorCode := reconcileLogs(args, rf.log, currentTerm, rf.me)
+	updatedMatchIndex, errorCode := rf.reconcileLogs(args, rf.log, currentTerm, rf.me)
 	rf.mu.Unlock()
 
 	if errorCode == _200_OK() {
@@ -630,7 +607,7 @@ func (rf *Raft) AppendEntriesOrHeartbeatRPC(args EntryRequestArgs, reply *EntryR
 	reply.ErrorCode = errorCode
 }
 
-func reconcileLogs(
+func (rf *Raft) reconcileLogs(
 	args EntryRequestArgs,
 	peerLog *[]LogItem,
 	peerTerm int,
@@ -655,12 +632,12 @@ func reconcileLogs(
 
 	// If Payload exists
 	if leaderLogsToReplicate != nil && leaderLogLen != 0 {
-		//fmt.Printf("[peer %v][term %v] reconcileLogs payload exists\n", peerId, peerTerm)
+		//if debug {
+		//	fmt.Printf("[peer %v][term %v] reconcileLogs payload exists\n", peerId, peerTerm)
+		//}
 		if leaderLogsCountOfCurrentTerm < getNumOfCommittedLogsForTerm(peerTerm, peerLog) {
 			// reject
-			if debug {
-				fmt.Printf("[peer %v][term %v] reconcileLogs reject_402\n", peerId, peerTerm)
-			}
+			debugLog(peerId, fmt.Sprintf("[peer %v][term %v] reconcileLogs reject_402\n", peerId, peerTerm))
 			return -1, _402_MoreNumOfCommittedLogsOfCurrentTerm()
 		}
 
@@ -668,11 +645,10 @@ func reconcileLogs(
 			(matchIndex >= len(*peerLog) ||
 				(0 <= matchIndex && matchIndex < len(*peerLog) && logItemAtMatchIndex != (*peerLog)[matchIndex])) {
 			// matchIndex log is not matching with leader -> reject
-			if debug {
-				fmt.Printf("[peer %v][term %v] reconcileLogs reject_403 [matchIndex:%v]\n", peerId, peerTerm, matchIndex)
-				//printLog(leaderLog, "leaderLog")
-				//printLog(*peerLog, "peerLog")
-			}
+			debugLog(peerId, fmt.Sprintf("[peer %v][term %v] reconcileLogs reject_403 [matchIndex:%v]\n", peerId, peerTerm, matchIndex))
+			//printLog(leaderLog, "leaderLog")
+			//printLog(*peerLog, "peerLog")
+
 			return -1, _403_UnequalLogsAtMatchIndex()
 		}
 
@@ -687,29 +663,32 @@ func reconcileLogs(
 			} else {
 				// peerIndex > peerLogLen
 				// this case shouldn't reach
-				if debug {
-					fmt.Printf("[peer %v][term %v] reconcileLogs unreachable condition reached\n", peerId, peerTerm)
-				}
+				debugLog(peerIndex, fmt.Sprintf("[peer %v][term %v] reconcileLogs unreachable condition reached\n", peerId, peerTerm))
+
 			}
 
 			if (leaderLogsToReplicate)[i].IsCommitted {
-				if debug {
-					fmt.Printf("[peer %v][term %v] reconcileLogs: peer committing %v \n", peerId, peerTerm, i)
-				}
+				debugLog(peerId, fmt.Sprintf("[peer %v][term %v] reconcileLogs: peer committing %v \n", peerId, peerTerm, i))
+				rf.notifyCommit(peerIndex)
 				updatedMatchIndex = peerIndex
 			}
 		}
 
-		// TODO : check indexes
-		*peerLog = (*peerLog)[:matchIndex+leaderLogLen]
+		// trimming unwanted entries from peerlog
+		trimLength := leaderLogLen
+		if matchIndex != -1 {
+			trimLength += matchIndex
+		}
+		if len(*peerLog) > trimLength {
+			*peerLog = (*peerLog)[:trimLength]
+		}
+
 	}
 	return updatedMatchIndex, _200_OK()
 }
 
 func (rf *Raft) transitionBackToFollower(currentTerm int) {
-	if debug {
-		fmt.Printf("[peer %v][term %v] transitionBackToFollower\n", rf.me, currentTerm)
-	}
+	debugLog(rf.me, fmt.Sprintf("[peer %v][term %v] transitionBackToFollower\n", rf.me, currentTerm))
 	rf.UpdateState(currentTerm, FollowerRole())
 }
 
@@ -767,6 +746,37 @@ func initMatchIndexesOf(peersCount int) map[int]int {
 		matchIndexesOf[peerId] = -1
 	}
 	return matchIndexesOf
+}
+
+func getLogsToSend(log *[]LogItem, matchIndex int, nextIndex int) ([]LogItem, LogItem) {
+	var logsToReplicate []LogItem
+	var logItemAtMatchIndex LogItem
+	if matchIndex == -1 {
+		logsToReplicate = *log
+		logItemAtMatchIndex = LogItem{} // dummy
+
+	} else {
+		logsToReplicate = (*log)[matchIndex+1 : nextIndex]
+		logItemAtMatchIndex = (*log)[matchIndex]
+	}
+
+	return logsToReplicate, logItemAtMatchIndex
+}
+
+func (rf *Raft) notifyCommit(index int) {
+	if rf.applyCh == nil {
+		// nil when called from test suite.
+		// No need of null check in actual logic
+		return
+	}
+	rf.applyCh <- ApplyMsg{
+		Index:       index + 1, // verification code has 1 based-indexing
+		Command:     (*rf.log)[index].Command,
+		UseSnapshot: false,
+		Snapshot:    nil,
+	}
+	debugLog(rf.me, fmt.Sprintf("[Peer %v][term %v] commit notified %v %v\n",
+		rf.me, rf.currentTerm, index, (*rf.log)[index].Command))
 }
 
 func printLog(log []LogItem, name string) {
@@ -867,3 +877,18 @@ func _200_OK() ErrorCode                                  { return ErrorCode{200
 func _401_OlderTerm() ErrorCode                           { return ErrorCode{401} }
 func _402_MoreNumOfCommittedLogsOfCurrentTerm() ErrorCode { return ErrorCode{402} }
 func _403_UnequalLogsAtMatchIndex() ErrorCode             { return ErrorCode{403} }
+
+// LOGGER
+func debugLog(peerId int, logString string) {
+	if true {
+		f, err := os.OpenFile("debug-"+strconv.Itoa(peerId)+".log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			log.Println(err)
+		}
+		defer f.Close()
+		timestamp := time.Now().Format("15:04:05.000000")
+		if _, err := f.WriteString("[" + timestamp + "]   " + logString); err != nil {
+			log.Println(err)
+		}
+	}
+}

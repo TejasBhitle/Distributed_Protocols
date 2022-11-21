@@ -394,6 +394,7 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 			if rf != nil {
 				index1, _, ok := rf.Start(cmd)
 				if ok {
+					//fmt.Printf("Chosen============ %v as index\n", index1)
 					index = index1
 					break
 				}
@@ -406,6 +407,9 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
+				//fmt.Printf("nCommitted============Chosen nd:%v cmd:%v expectedServers:%v index:%v\n",
+				//	nd, cmd1, expectedServers, index)
+
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd2, ok := cmd1.(int); ok && cmd2 == cmd {

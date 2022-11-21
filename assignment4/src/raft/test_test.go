@@ -90,7 +90,7 @@ func TestBasicAgree(t *testing.T) {
 
 	fmt.Println("Test: basic agreement...")
 
-	iters := 3
+	iters := 1
 	for index := 1; index < iters+1; index++ {
 		nd, _ := cfg.nCommitted(index)
 		if nd > 0 {

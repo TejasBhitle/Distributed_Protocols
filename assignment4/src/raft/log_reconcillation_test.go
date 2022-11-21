@@ -6,8 +6,8 @@ import (
 )
 
 func Test0(t *testing.T) {
-
 	// input
+	rf := Raft{}
 	leaderLog := &[]LogItem{}
 	*leaderLog = append(*leaderLog, LogItem{"cmd0", 0, false})
 	matchIndex := -1
@@ -19,18 +19,22 @@ func Test0(t *testing.T) {
 	}
 
 	// common logic
+	logsToReplicate, logItemAtMatchIndex := getLogsToSend(leaderLog, matchIndex, len(*leaderLog))
+	fmt.Printf("%v  %v\n", logsToReplicate, logItemAtMatchIndex)
+
 	args := EntryRequestArgs{
 		LeaderId:   0,
 		LeaderTerm: 0,
 		EntryRequestPayload: EntryRequestPayload{
-			Logs:                            getLeaderLogsToSend(leaderLog, matchIndex),
+			LogsToReplicate:                 logsToReplicate,
+			LogItemAtMatchIndex:             logItemAtMatchIndex,
 			MatchIndex:                      matchIndex,
 			NumOfCommittedLogsOfCurrentTerm: numOfLogs,
 		},
 	}
 
-	updatedMatchIndex, errorCode := reconcileLogs(args, peerLog, 0, 0)
-
+	updatedMatchIndex, errorCode := rf.reconcileLogs(args, peerLog, 0, 0)
+	fmt.Printf("updatedMatchIndex:%v  errorCode:%v\n", updatedMatchIndex, errorCode)
 	// assertions
 	if !areLogsEqual(leaderLog, peerLog) {
 		fmt.Printf("%v %v\n", len(*leaderLog), len(*peerLog))
@@ -47,7 +51,7 @@ func Test0(t *testing.T) {
 }
 
 func Test1(t *testing.T) {
-
+	rf := Raft{}
 	// input
 	leaderLog := &[]LogItem{}
 	*leaderLog = append(*leaderLog, LogItem{"cmd0", 0, false})
@@ -61,18 +65,20 @@ func Test1(t *testing.T) {
 	numOfLogs := getNumOfCommittedLogsForTerm(0, leaderLog)
 
 	// common logic
+	logsToReplicate, logItemAtMatchIndex := getLogsToSend(leaderLog, matchIndex, len(*leaderLog))
 
 	args := EntryRequestArgs{
 		LeaderId:   0,
 		LeaderTerm: 0,
 		EntryRequestPayload: EntryRequestPayload{
-			Logs:                            getLeaderLogsToSend(leaderLog, matchIndex),
+			LogsToReplicate:                 logsToReplicate,
+			LogItemAtMatchIndex:             logItemAtMatchIndex,
 			MatchIndex:                      matchIndex,
 			NumOfCommittedLogsOfCurrentTerm: numOfLogs,
 		},
 	}
 
-	updatedMatchIndex, errorCode := reconcileLogs(args, peerLog, 0, 0)
+	updatedMatchIndex, errorCode := rf.reconcileLogs(args, peerLog, 0, 0)
 	fmt.Printf("%v %v\n", updatedMatchIndex, errorCode)
 	// assertions
 	if !areLogsEqual(leaderLog, peerLog) {
@@ -90,7 +96,7 @@ func Test1(t *testing.T) {
 }
 
 func Test2(t *testing.T) {
-
+	rf := Raft{}
 	// input
 	leaderLog := &[]LogItem{}
 	*leaderLog = append(*leaderLog, LogItem{"cmd0", 0, true})
@@ -104,18 +110,19 @@ func Test2(t *testing.T) {
 	numOfLogs := getNumOfCommittedLogsForTerm(0, leaderLog)
 
 	// common logic
-
+	logsToReplicate, logItemAtMatchIndex := getLogsToSend(leaderLog, matchIndex, len(*leaderLog))
 	args := EntryRequestArgs{
 		LeaderId:   0,
 		LeaderTerm: 0,
 		EntryRequestPayload: EntryRequestPayload{
-			Logs:                            getLeaderLogsToSend(leaderLog, matchIndex),
+			LogsToReplicate:                 logsToReplicate,
+			LogItemAtMatchIndex:             logItemAtMatchIndex,
 			MatchIndex:                      matchIndex,
 			NumOfCommittedLogsOfCurrentTerm: numOfLogs,
 		},
 	}
 
-	updatedMatchIndex, errorCode := reconcileLogs(args, peerLog, 0, 0)
+	updatedMatchIndex, errorCode := rf.reconcileLogs(args, peerLog, 0, 0)
 	fmt.Printf("%v %v\n", updatedMatchIndex, errorCode)
 	// assertions
 	if !areLogsEqual(leaderLog, peerLog) {
@@ -133,7 +140,7 @@ func Test2(t *testing.T) {
 }
 
 func Test3(t *testing.T) {
-
+	rf := Raft{}
 	// input
 	leaderLog := &[]LogItem{}
 	*leaderLog = append(*leaderLog, LogItem{"cmd0", 0, false})
@@ -148,18 +155,20 @@ func Test3(t *testing.T) {
 	numOfLogs := getNumOfCommittedLogsForTerm(0, leaderLog)
 
 	// common logic
+	logsToReplicate, logItemAtMatchIndex := getLogsToSend(leaderLog, matchIndex, len(*leaderLog))
 
 	args := EntryRequestArgs{
 		LeaderId:   0,
 		LeaderTerm: 0,
 		EntryRequestPayload: EntryRequestPayload{
-			Logs:                            getLeaderLogsToSend(leaderLog, matchIndex),
+			LogsToReplicate:                 logsToReplicate,
+			LogItemAtMatchIndex:             logItemAtMatchIndex,
 			MatchIndex:                      matchIndex,
 			NumOfCommittedLogsOfCurrentTerm: numOfLogs,
 		},
 	}
 
-	updatedMatchIndex, errorCode := reconcileLogs(args, peerLog, 0, 0)
+	updatedMatchIndex, errorCode := rf.reconcileLogs(args, peerLog, 0, 0)
 	fmt.Printf("%v %v\n", updatedMatchIndex, errorCode)
 	// assertions
 	if errorCode != _402_MoreNumOfCommittedLogsOfCurrentTerm() {
@@ -173,7 +182,7 @@ func Test3(t *testing.T) {
 }
 
 func Test4(t *testing.T) {
-
+	rf := Raft{}
 	// input
 	leaderLog := &[]LogItem{}
 	*leaderLog = append(*leaderLog, LogItem{"cmd0", 0, true})
@@ -190,18 +199,20 @@ func Test4(t *testing.T) {
 	numOfLogs := getNumOfCommittedLogsForTerm(1, leaderLog)
 
 	// common logic
+	logsToReplicate, logItemAtMatchIndex := getLogsToSend(leaderLog, matchIndex, len(*leaderLog))
 
 	args := EntryRequestArgs{
 		LeaderId:   0,
 		LeaderTerm: 1,
 		EntryRequestPayload: EntryRequestPayload{
-			Logs:                            getLeaderLogsToSend(leaderLog, matchIndex),
+			LogsToReplicate:                 logsToReplicate,
+			LogItemAtMatchIndex:             logItemAtMatchIndex,
 			MatchIndex:                      matchIndex,
 			NumOfCommittedLogsOfCurrentTerm: numOfLogs,
 		},
 	}
 
-	updatedMatchIndex, errorCode := reconcileLogs(args, peerLog, 1, 0)
+	updatedMatchIndex, errorCode := rf.reconcileLogs(args, peerLog, 1, 0)
 	fmt.Printf("%v %v\n", updatedMatchIndex, errorCode)
 	// assertions
 	if !areLogsEqual(leaderLog, peerLog) {
@@ -219,7 +230,7 @@ func Test4(t *testing.T) {
 }
 
 func Test5(t *testing.T) {
-
+	rf := Raft{}
 	// input
 	leaderLog := &[]LogItem{}
 	*leaderLog = append(*leaderLog, LogItem{"cmd0", 0, true})
@@ -229,25 +240,26 @@ func Test5(t *testing.T) {
 
 	numOfLogs := getNumOfCommittedLogsForTerm(0, leaderLog)
 
-	logsToSend := getLeaderLogsToSend(leaderLog, matchIndex)
-	if len(logsToSend) > 0 {
-		fmt.Printf("logsToSend unexpected %v \n", len(logsToSend))
+	// common logic
+	logsToReplicate, logItemAtMatchIndex := getLogsToSend(leaderLog, matchIndex, len(*leaderLog))
+
+	if len(logsToReplicate) > 0 {
+		fmt.Printf("logsToReplicate unexpected %v \n", len(logsToReplicate))
 		t.Fatal("")
 	}
-
-	// common logic
 
 	args := EntryRequestArgs{
 		LeaderId:   0,
 		LeaderTerm: 1,
 		EntryRequestPayload: EntryRequestPayload{
-			Logs:                            logsToSend,
+			LogsToReplicate:                 logsToReplicate,
+			LogItemAtMatchIndex:             logItemAtMatchIndex,
 			MatchIndex:                      matchIndex,
 			NumOfCommittedLogsOfCurrentTerm: numOfLogs,
 		},
 	}
 
-	updatedMatchIndex, errorCode := reconcileLogs(args, peerLog, 1, 0)
+	updatedMatchIndex, errorCode := rf.reconcileLogs(args, peerLog, 1, 0)
 	fmt.Printf("%v %v\n", updatedMatchIndex, errorCode)
 	// assertions
 	if !areLogsEqual(leaderLog, peerLog) {
