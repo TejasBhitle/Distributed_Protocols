@@ -218,10 +218,56 @@ func Test4(t *testing.T) {
 	t.Log("All OK..")
 }
 
-func printLog(log *[]LogItem) {
-	fmt.Printf("printling log")
-	for i := 0; i < len(*log); i++ {
-		fmt.Printf("%v ", (*log)[i])
+func Test5(t *testing.T) {
+
+	// input
+	leaderLog := &[]LogItem{}
+	*leaderLog = append(*leaderLog, LogItem{"cmd0", 0, true})
+	matchIndex := 0
+	peerLog := &[]LogItem{}
+	*peerLog = append(*peerLog, LogItem{"cmd0", 0, true})
+
+	numOfLogs := getNumOfCommittedLogsForTerm(0, leaderLog)
+
+	logsToSend := getLeaderLogsToSend(leaderLog, matchIndex)
+	if len(logsToSend) > 0 {
+		fmt.Printf("logsToSend unexpected %v \n", len(logsToSend))
+		t.Fatal("")
 	}
-	fmt.Printf("\n")
+
+	// common logic
+
+	args := EntryRequestArgs{
+		LeaderId:   0,
+		LeaderTerm: 1,
+		EntryRequestPayload: EntryRequestPayload{
+			Logs:                            logsToSend,
+			MatchIndex:                      matchIndex,
+			NumOfCommittedLogsOfCurrentTerm: numOfLogs,
+		},
+	}
+
+	updatedMatchIndex, errorCode := reconcileLogs(args, peerLog, 1, 0)
+	fmt.Printf("%v %v\n", updatedMatchIndex, errorCode)
+	// assertions
+	if !areLogsEqual(leaderLog, peerLog) {
+		fmt.Printf("%v %v\n", len(*leaderLog), len(*peerLog))
+		t.Fatal("unequal logs")
+	}
+	if updatedMatchIndex != 0 {
+		t.Fatal("wrong updatedMatchIndex")
+	}
+	if errorCode != _200_OK() {
+		t.Fatal("wrong errorCode")
+	}
+
+	t.Log("All OK..")
 }
+
+//func printLog(log *[]LogItem) {
+//	fmt.Printf("printling log")
+//	for i := 0; i < len(*log); i++ {
+//		fmt.Printf("%v ", (*log)[i])
+//	}
+//	fmt.Printf("\n")
+//}

@@ -43,7 +43,7 @@ type ApplyMsg struct {
 // This duration should be less than election timeout duration
 const heartBeatDuration = 100 * time.Millisecond
 
-const debug = false
+const debug = true
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
@@ -87,7 +87,8 @@ type Raft struct {
 	//---------------------- fields used for Log Replication by Leaders
 
 	/* for tentative & commit conformation */
-	confirmationStatusMap map[int]ConfirmationStatus
+	confirmationStatusMap   map[int]ConfirmationStatus // K:logIndex , V:ConfirmationStatus
+	confirmationStatusMapMU sync.Mutex
 
 	/* match Indexes of peers. [Only applicable when this peer is leader]*/
 	matchIndexesOf map[int]int
@@ -245,11 +246,16 @@ func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 	log := rf.log
 	nextIndex := rf.nextIndex
 	matchIndex := rf.matchIndexesOf[peerId]
-	if matchIndex == -1 {
-		matchIndex = 0
-	}
-	payload.Logs = (*log)[matchIndex:nextIndex]
 	payload.MatchIndex = matchIndex
+	startIndex := matchIndex
+	if startIndex == -1 {
+		startIndex = 0
+	}
+	payload.Logs = (*log)[startIndex:nextIndex]
+	if debug {
+		fmt.Printf("[Leader %v][term %v] sendAppendEntries %v [%v:%v]\n", rf.me, currentTerm, payload.Logs, startIndex, nextIndex)
+	}
+
 	payload.NumOfCommittedLogsOfCurrentTerm = getNumOfCommittedLogsForTerm(currentTerm, log)
 	rf.mu.Unlock()
 
@@ -271,15 +277,21 @@ func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 
 		switch entryRequestReply.ErrorCode {
 		case _200_OK():
+			rf.mu.Lock()
 			rf.matchIndexesOf[peerId] = entryRequestReply.UpdatedMatchIndex
-			for i := matchIndex + 1; i <= nextIndex; i++ {
-				if _, ok := rf.confirmationStatusMap[i]; ok {
-					rf.confirmationStatusMap[i] = generateInitialConfirmationStatusMap(len(rf.peers))
-					rf.confirmationStatusMap[i].markStatusAccepted(rf.me)
-				}
-				rf.confirmationStatusMap[i].markStatusAccepted(peerId)
+			rf.mu.Unlock()
+			for i := matchIndex + 1; i < nextIndex; i++ {
 
+				rf.markConfirmationStatusAccepted(i, peerId)
+				if debug {
+					fmt.Printf("[Leader %v][term %v] marking Accepted of %v by %v [acceptedCount:%v] \n", rf.me, currentTerm, i, peerId, rf.confirmationStatusMap[i].acceptedCount)
+				}
 				if rf.confirmationStatusMap[i].acceptedCount > (len(rf.peers)-1)/2 && !(*rf.log)[i].IsCommitted {
+
+					if debug {
+						fmt.Printf("[Leader %v][term %v] Leader Committing %v \n", rf.me, currentTerm, i)
+					}
+
 					(*rf.log)[i].IsCommitted = true
 					rf.applyCh <- ApplyMsg{
 						Index:       i,
@@ -300,7 +312,9 @@ func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 			break
 
 		case _403_UnequalLogsAtMatchIndex():
+			rf.mu.Lock()
 			rf.matchIndexesOf[peerId] = -1
+			rf.mu.Unlock()
 			go rf.sendAppendEntries(peerId, currentTerm)
 			break
 		}
@@ -331,14 +345,17 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Term:        term,
 			IsCommitted: false,
 		}
-		confirmationStatus := generateInitialConfirmationStatusMap(len(rf.peers))
-		confirmationStatus.markStatusAccepted(rf.me)
+		confirmationStatus := generateInitialConfirmationStatusMap(rf.me, len(rf.peers))
 
 		// 2. Write to own log [use Critical Section]
 		*rf.log = append(*rf.log, logItem)
 		nextIndex = rf.nextIndex
 		rf.confirmationStatusMap[nextIndex] = confirmationStatus
 		rf.nextIndex++
+
+		if debug {
+			fmt.Printf("[Leader %v][term %v] Start : cmd saved at %v [cs %v]\n", rf.me, rf.currentTerm, nextIndex, confirmationStatus)
+		}
 	}
 
 	return nextIndex, term, isLeader
@@ -526,7 +543,7 @@ func (rf *Raft) transitionToLeaderIfSufficientVotes(requestVoteReply RequestVote
 		return
 	}
 
-	if receivedVotes > 1 {
+	if receivedVotes > 1 && rf.peerRole != LeaderRole() {
 		if debug {
 			fmt.Printf("[Candidate %v][term %v] TRANSITION To Leader\n", rf.me, rf.currentTerm)
 		}
@@ -585,7 +602,7 @@ func (rf *Raft) relayToAllPeers(currentTerm int) {
 func (rf *Raft) AppendEntriesOrHeartbeatRPC(args EntryRequestArgs, reply *EntryRequestReply) {
 	currentTerm, _ := rf.GetState()
 	if debug {
-		fmt.Printf("[peer %v][term %v] AppendEntriesRPC received from %v\n", rf.me, currentTerm, args.LeaderId)
+		fmt.Printf("[peer %v][term %v] AppendEntriesRPC received from %v data[%v]\n", rf.me, currentTerm, args.LeaderId, args.EntryRequestPayload)
 	}
 
 	rf.mu.Lock()
@@ -645,7 +662,9 @@ func reconcileLogs(
 				(0 <= matchIndex && matchIndex < len(*peerLog) && (leaderLog)[matchIndex] != (*peerLog)[matchIndex])) {
 			// matchIndex log is not matching with leader -> reject
 			if debug {
-				fmt.Printf("[peer %v][term %v] reconcileLogs reject_403\n", peerId, peerTerm)
+				fmt.Printf("[peer %v][term %v] reconcileLogs reject_403 [matchIndex:%v]\n", peerId, peerTerm, matchIndex)
+				printLog(leaderLog, "leaderLog")
+				printLog(*peerLog, "peerLog")
 			}
 			return -1, _403_UnequalLogsAtMatchIndex()
 		}
@@ -660,12 +679,16 @@ func reconcileLogs(
 
 		} else {
 			startIndex = matchIndex + 1
-			endIndex = startIndex + leaderLogLen
+			endIndex = matchIndex + leaderLogLen
 
 		}
-		//fmt.Printf("[peer %v][term %v] reconcileLogs reconcilling\n", peerId, peerTerm)
+
 		for i := startIndex; i < endIndex; i++ {
 			if i == len(*peerLog) {
+				if debug {
+					fmt.Printf("DEBUG [peer %v][term %v] [matchIndex:%v] [endIndex:%v] [leaderLogLen:%v] [peerLogLen:%v]\n",
+						peerId, peerTerm, matchIndex, endIndex, leaderLogLen, peerLogLen)
+				}
 				*peerLog = append(*peerLog, (leaderLog)[i])
 			} else if i < len(*peerLog) {
 				(*peerLog)[i] = (leaderLog)[i]
@@ -677,6 +700,9 @@ func reconcileLogs(
 			}
 
 			if (leaderLog)[i].IsCommitted {
+				if debug {
+					fmt.Printf("[peer %v][term %v] reconcileLogs: peer committing %v \n", peerId, peerTerm, i)
+				}
 				updatedMatchIndex = i
 			}
 		}
@@ -739,6 +765,9 @@ func getLeaderLogsToSend(leaderLog *[]LogItem, matchIndex int) []LogItem {
 		leaderLogToSend = *leaderLog
 	} else {
 		leaderLogToSend = (*leaderLog)[matchIndex:]
+		if len(leaderLogToSend) == 1 {
+			leaderLogToSend = []LogItem{}
+		}
 	}
 	return leaderLogToSend
 }
@@ -749,6 +778,16 @@ func initMatchIndexesOf(peersCount int) map[int]int {
 		matchIndexesOf[peerId] = -1
 	}
 	return matchIndexesOf
+}
+
+func printLog(log []LogItem, name string) {
+	logStr := name + "-> "
+	fmt.Printf("\n")
+	for i := 0; i < len(log); i++ {
+		logStr += fmt.Sprintf("%v, ", log[i])
+	}
+	logStr += "\n"
+	fmt.Printf(logStr)
 }
 
 /* STRUCTS AND ENUMS */
@@ -797,22 +836,36 @@ func PeerAccurate() ReconciliationResult   { return ReconciliationResult{1} }
 // ConfirmationStatus Enum
 type ConfirmationStatus struct {
 	acceptedCount int
-	isAccepted    map[int]bool
+	isAccepted    []bool
 }
 
-func (confirmationStatus ConfirmationStatus) markStatusAccepted(peerId int) {
-	if !confirmationStatus.isAccepted[peerId] {
+func (rf *Raft) markConfirmationStatusAccepted(logIndex int, peerId int) {
+	rf.confirmationStatusMapMU.Lock()
+	defer rf.confirmationStatusMapMU.Unlock()
+
+	if _, ok := rf.confirmationStatusMap[logIndex]; !ok {
+		rf.confirmationStatusMap[logIndex] = generateInitialConfirmationStatusMap(rf.me, len(rf.peers))
+	}
+
+	if !rf.confirmationStatusMap[logIndex].isAccepted[peerId] {
+		confirmationStatus, _ := rf.confirmationStatusMap[logIndex]
 		confirmationStatus.isAccepted[peerId] = true
 		confirmationStatus.acceptedCount++
+		rf.confirmationStatusMap[logIndex] = confirmationStatus
 	}
+
 }
 
-func generateInitialConfirmationStatusMap(peersCount int) ConfirmationStatus {
-	confirmationStatus := ConfirmationStatus{}
-	for peerId := 0; peerId < peersCount; peerId++ {
-		confirmationStatus.isAccepted[peerId] = false
+func generateInitialConfirmationStatusMap(self int, peersCount int) ConfirmationStatus {
+	confirmationStatus := ConfirmationStatus{
+		acceptedCount: 0,
+		isAccepted:    make([]bool, peersCount),
 	}
-	confirmationStatus.acceptedCount = 0
+
+	for peerId := 0; peerId < peersCount; peerId++ {
+		confirmationStatus.isAccepted[peerId] = self == peerId
+	}
+	confirmationStatus.acceptedCount = 1
 	return confirmationStatus
 }
 
