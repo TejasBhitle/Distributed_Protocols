@@ -243,7 +243,8 @@ func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 
 	matchIndex := rf.matchIndexesOf[peerId]
 	nextIndex := rf.nextIndex
-
+	//debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] preping to send AppendEntriesRPC to %v] matchIndex:%v nextIndex:%v\n",
+	//	rf.me, currentTerm, peerId, matchIndex, nextIndex))
 	logsToReplicate, logItemAtMatchIndex := getLogsToSend(rf.log, matchIndex, nextIndex)
 
 	payload := EntryRequestPayload{
@@ -283,7 +284,7 @@ func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 				rf.me, currentTerm, (*rf.log)[i].Command, i, peerId, rf.confirmationStatusMap[i].acceptedCount))
 
 			rf.mu.Lock()
-			if rf.confirmationStatusMap[i].acceptedCount > (len(rf.peers)-1)/2 && !(*rf.log)[i].IsCommitted {
+			if rf.confirmationStatusMap[i].acceptedCount >= (len(rf.peers)/2+1) && !(*rf.log)[i].IsCommitted {
 
 				debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] Leader Committing [%v] at index:%v \n", rf.me, currentTerm, (*rf.log)[i].Command, i))
 				(*rf.log)[i].IsCommitted = true
@@ -348,6 +349,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.nextIndex++
 		debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] Start : cmd %v saved at %v [cs %v]\n",
 			rf.me, rf.currentTerm, command, nextIndex, confirmationStatus))
+
+		rf.persist()
 	}
 
 	return nextIndex + 1, term, isLeader
@@ -360,6 +363,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // turn off debug output from this instance.
 func (rf *Raft) Kill() {
 	// Your code here, if desired.h
+	debugLog(rf.me, fmt.Sprintf("[Peer %v][term %v] Killed....................\n", rf.me, rf.currentTerm))
 }
 
 // Make
@@ -537,6 +541,8 @@ func (rf *Raft) transitionToLeaderIfSufficientVotes(requestVoteReply RequestVote
 		debugLog(rf.me, fmt.Sprintf("[Candidate %v][term %v] TRANSITION To Leader\n", rf.me, rf.currentTerm))
 		// Make current peer leader
 		rf.peerRole = LeaderRole()
+		rf.matchIndexesOf = initMatchIndexesOf(len(rf.peers))
+		rf.confirmationStatusMap = map[int]ConfirmationStatus{}
 		rf.startPeriodicBroadcastBackgroundProcess()
 	}
 }
@@ -826,14 +832,6 @@ type EntryRequestPayload struct {
 	LogItemAtMatchIndex             LogItem
 	NumOfCommittedLogsOfCurrentTerm int
 }
-
-// ReconciliationResult Enum
-type ReconciliationResult struct {
-	result int
-}
-
-func LeaderAccurate() ReconciliationResult { return ReconciliationResult{0} }
-func PeerAccurate() ReconciliationResult   { return ReconciliationResult{1} }
 
 // ConfirmationStatus Enum
 type ConfirmationStatus struct {

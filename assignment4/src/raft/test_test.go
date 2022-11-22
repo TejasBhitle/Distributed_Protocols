@@ -118,6 +118,7 @@ func TestFailAgree(t *testing.T) {
 
 	// follower network failure
 	leader := cfg.checkOneLeader()
+	fmt.Printf("Test: disconnect peer %v \n", (leader+1)%servers)
 	cfg.disconnect((leader + 1) % servers)
 
 	// agree despite one failed server?
