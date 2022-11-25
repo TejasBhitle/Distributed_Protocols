@@ -66,7 +66,7 @@ type Raft struct {
 	/* K,V -> term, candidateId */
 	votedForMap sync.Map
 
-	/* K,V -> term, (K,V) -> peerId, voteInFavour */
+	/* K,V -> term, (K,V) -> peerId, *voteInFavour */
 	receivedVotesCounter sync.Map
 
 	/* send true on this channel to reset the election timeout
@@ -184,7 +184,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
 	//fmt.Printf("[Requesting Vote by %v for term %v from server %v] \n", args.RequestingPeerId, args.RequestingPeerTerm, rf.me)
 
-	reply.RespondingPeerTerm = args.RequestingPeerTerm
+	reply.RespondingPeerTerm = rf.currentTerm
 
 	// If already voted for someone else for this term
 	votedFor, _ := rf.votedForMap.Load(args.RequestingPeerTerm)
@@ -193,9 +193,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 
 	} else {
 
-		currentTerm, _ := rf.GetState()
-
-		if args.RequestingPeerTerm < currentTerm {
+		if args.RequestingPeerTerm < rf.currentTerm {
 			// requesting peer is not on the latest term && desires to be leader -> reject
 			reply.VotedInFavour = false
 
@@ -211,8 +209,10 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	if reply.VotedInFavour {
 		rf.UpdateState(args.RequestingPeerTerm, FollowerRole())
 		rf.resetElectionTimeoutChan <- true
+		reply.RespondingPeerTerm = args.RequestingPeerTerm
 	}
-	debugLog(rf.me, fmt.Sprintf("[Peer %v][term %v] RequestVote voted %v to %v] \n", rf.me, rf.currentTerm, reply.VotedInFavour, args.RequestingPeerId))
+	debugLog(rf.me, fmt.Sprintf("[Peer %v][term %v] RequestVote voted %v to %v] args.CommittedLogsInCurrentTerm[%v] peerLog[%v]\n",
+		rf.me, rf.currentTerm, reply.VotedInFavour, args.RequestingPeerId, args.CommittedLogsInCurrentTerm, *rf.log))
 
 }
 
@@ -286,7 +286,8 @@ func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 			rf.mu.Lock()
 			if rf.confirmationStatusMap[i].acceptedCount >= (len(rf.peers)/2+1) && !(*rf.log)[i].IsCommitted {
 
-				debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] Leader Committing [%v] at index:%v \n", rf.me, currentTerm, (*rf.log)[i].Command, i))
+				debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] Leader Committing [%v] at index:%v confirmationStatusMap:%v\n",
+					rf.me, currentTerm, (*rf.log)[i].Command, i, rf.confirmationStatusMap[i].isAccepted))
 				(*rf.log)[i].IsCommitted = true
 				rf.notifyCommit(i)
 
@@ -464,9 +465,9 @@ func (rf *Raft) tryTakingLeaderRole() {
 
 		if index == rf.me {
 			// mark self vote and ignore requesting vote from self
-			receivedVotesForTerm_, _ := rf.receivedVotesCounter.LoadOrStore(currentTerm, sync.Map{})
-			receivedVotesForTerm := receivedVotesForTerm_.(sync.Map)
-			receivedVotesForTerm.Store(rf.me, true)
+			receivedVotesForTerm_, _ := rf.receivedVotesCounter.LoadOrStore(currentTerm, &sync.Map{})
+			receivedVotesForTerm := receivedVotesForTerm_.(*sync.Map)
+			(*receivedVotesForTerm).Store(rf.me, true)
 			rf.receivedVotesCounter.Store(currentTerm, receivedVotesForTerm)
 			continue
 		}
@@ -484,9 +485,9 @@ func (rf *Raft) tryTakingLeaderRole() {
 			if ok {
 				// got vote reply
 				//fmt.Printf("tryTakingLeaderRole %v -> got %v from %v\n", rf.me, requestVoteReply.VotedInFavour, index)
-				receivedVotesCounter_, _ := rf.receivedVotesCounter.LoadOrStore(requestVoteReply.RespondingPeerTerm, sync.Map{})
-				receivedVotesCounter := receivedVotesCounter_.(sync.Map)
-				receivedVotesCounter.Store(index, requestVoteReply.VotedInFavour)
+				receivedVotesCounter_, _ := rf.receivedVotesCounter.LoadOrStore(requestVoteReply.RespondingPeerTerm, &sync.Map{})
+				receivedVotesCounter := receivedVotesCounter_.(*sync.Map)
+				(*receivedVotesCounter).Store(index, requestVoteReply.VotedInFavour)
 
 				if requestVoteReply.VotedInFavour {
 					rf.transitionToLeaderIfSufficientVotes(requestVoteReply)
@@ -518,12 +519,12 @@ func (rf *Raft) transitionToLeaderIfSufficientVotes(requestVoteReply RequestVote
 		return
 	}
 
-	requiredVotes := (len(rf.peers) - 1) / 2
+	requiredVotes := len(rf.peers)/2 + 1 //(len(rf.peers) - 1) / 2
 	receivedVotes := 0
 
-	receivedVotesCounter_, _ := rf.receivedVotesCounter.LoadOrStore(respondingPeerTerm, sync.Map{})
-	receivedVotesCounter := receivedVotesCounter_.(sync.Map)
-	receivedVotesCounter.Range(func(key, ifVotedInFavour any) bool {
+	receivedVotesCounter_, _ := rf.receivedVotesCounter.LoadOrStore(respondingPeerTerm, &sync.Map{})
+	receivedVotesCounter := receivedVotesCounter_.(*sync.Map)
+	(*receivedVotesCounter).Range(func(key, ifVotedInFavour any) bool {
 		if ifVotedInFavour.(bool) {
 			receivedVotes++
 		}
@@ -597,9 +598,7 @@ func (rf *Raft) AppendEntriesOrHeartbeatRPC(args EntryRequestArgs, reply *EntryR
 	currentTerm, _ := rf.GetState()
 	debugLog(rf.me, fmt.Sprintf("[peer %v][term %v] AppendEntriesRPC received from %v data[%v]\n", rf.me, currentTerm, args.LeaderId, args.EntryRequestPayload))
 
-	rf.mu.Lock()
-	updatedMatchIndex, errorCode := rf.reconcileLogs(args, rf.log, currentTerm, rf.me)
-	rf.mu.Unlock()
+	updatedMatchIndex, errorCode := rf.reconcileLogs(args, currentTerm, rf.me)
 
 	if errorCode == _200_OK() {
 		// HeartBeat logic
@@ -617,10 +616,11 @@ func (rf *Raft) AppendEntriesOrHeartbeatRPC(args EntryRequestArgs, reply *EntryR
 
 func (rf *Raft) reconcileLogs(
 	args EntryRequestArgs,
-	peerLog *[]LogItem,
 	peerTerm int,
 	peerId int) (int, ErrorCode) {
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	//fmt.Printf("[peer %v][term %v] reconcileLogs begin\n", peerId, peerTerm)
 
 	leaderLogsToReplicate := args.EntryRequestPayload.LogsToReplicate
@@ -643,30 +643,30 @@ func (rf *Raft) reconcileLogs(
 		//if debug {
 		//	fmt.Printf("[peer %v][term %v] reconcileLogs payload exists\n", peerId, peerTerm)
 		//}
-		if leaderLogsCountOfCurrentTerm < getNumOfCommittedLogsForTerm(peerTerm, peerLog) {
+		if leaderLogsCountOfCurrentTerm < getNumOfCommittedLogsForTerm(peerTerm, rf.log) {
 			// reject
 			debugLog(peerId, fmt.Sprintf("[peer %v][term %v] reconcileLogs reject_402\n", peerId, peerTerm))
 			return -1, _402_MoreNumOfCommittedLogsOfCurrentTerm()
 		}
 
 		if matchIndex != -1 &&
-			(matchIndex >= len(*peerLog) ||
-				(0 <= matchIndex && matchIndex < len(*peerLog) && logItemAtMatchIndex != (*peerLog)[matchIndex])) {
+			(matchIndex >= len(*rf.log) ||
+				(0 <= matchIndex && matchIndex < len(*rf.log) && logItemAtMatchIndex != (*rf.log)[matchIndex])) {
 			// matchIndex log is not matching with leader -> reject
-			debugLog(peerId, fmt.Sprintf("[peer %v][term %v] reconcileLogs reject_403 [matchIndex:%v]\n", peerId, peerTerm, matchIndex))
-			//printLog(leaderLog, "leaderLog")
-			//printLog(*peerLog, "peerLog")
+
+			debugLog(peerId, fmt.Sprintf("[peer %v][term %v] reconcileLogs reject_403 [matchIndex:%v] [leaderLog:%v] [peerLog:%v] [logItemAtMatchIndex:%v]\n",
+				peerId, peerTerm, matchIndex, leaderLogsToReplicate, *rf.log, logItemAtMatchIndex))
 
 			return -1, _403_UnequalLogsAtMatchIndex()
 		}
 
 		for i := 0; i < len(leaderLogsToReplicate); i++ {
 			peerIndex := matchIndex + 1 + i
-			if peerIndex == len(*peerLog) {
-				*peerLog = append(*peerLog, leaderLogsToReplicate[i])
+			if peerIndex == len(*rf.log) {
+				*rf.log = append(*rf.log, leaderLogsToReplicate[i])
 
-			} else if peerIndex < len(*peerLog) {
-				(*peerLog)[peerIndex] = leaderLogsToReplicate[i]
+			} else if peerIndex < len(*rf.log) {
+				(*rf.log)[peerIndex] = leaderLogsToReplicate[i]
 
 			} else {
 				// peerIndex > peerLogLen
@@ -676,7 +676,8 @@ func (rf *Raft) reconcileLogs(
 			}
 
 			if (leaderLogsToReplicate)[i].IsCommitted {
-				debugLog(peerId, fmt.Sprintf("[peer %v][term %v] reconcileLogs: peer committing [%v] at index:%v \n", peerId, peerTerm, (leaderLogsToReplicate)[i].Command, peerIndex))
+				debugLog(peerId, fmt.Sprintf("[peer %v][term %v] reconcileLogs: peer committing [%v] at index:%v [peerLog:%v]\n",
+					peerId, peerTerm, (leaderLogsToReplicate)[i].Command, peerIndex, *rf.log))
 				rf.notifyCommit(peerIndex)
 				updatedMatchIndex = peerIndex
 			}
@@ -687,8 +688,8 @@ func (rf *Raft) reconcileLogs(
 		if matchIndex != -1 {
 			trimLength += matchIndex
 		}
-		if len(*peerLog) > trimLength {
-			*peerLog = (*peerLog)[:trimLength]
+		if len(*rf.log) > trimLength {
+			*rf.log = (*rf.log)[:trimLength]
 		}
 
 	}
@@ -853,7 +854,6 @@ func (rf *Raft) markConfirmationStatusAccepted(logIndex int, peerId int) {
 		confirmationStatus.acceptedCount++
 		rf.confirmationStatusMap[logIndex] = confirmationStatus
 	}
-
 }
 
 func generateInitialConfirmationStatusMap(self int, peersCount int) ConfirmationStatus {
