@@ -377,6 +377,7 @@ func TestBackup(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader2].Start(rand.Int())
 	}
+	fmt.Print("Test: 50 checks passed...")
 
 	time.Sleep(RaftElectionTimeout / 2)
 
@@ -392,6 +393,7 @@ func TestBackup(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3)
 	}
+	fmt.Print("Test: 50 backup checks passed...")
 
 	// now everyone
 	for i := 0; i < servers; i++ {

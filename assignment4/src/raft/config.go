@@ -414,6 +414,7 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 					// committed
 					if cmd2, ok := cmd1.(int); ok && cmd2 == cmd {
 						// and it was the command we submitted.
+						cfg.t.Logf("one(%v) success to reach agreement\n", cmd)
 						return index
 					}
 				}
