@@ -218,6 +218,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		rf.UpdateState(args.RequestingPeerTerm, FollowerRole())
 		rf.resetElectionTimeoutChan <- true
 		reply.RespondingPeerTerm = args.RequestingPeerTerm
+		rf.persist()
 	}
 	debugLog(rf.me, fmt.Sprintf("[Peer %v][term %v] RequestVote voted %v to %v] args[%v] peerLog[%v]\n",
 		rf.me, rf.currentTerm, reply.VotedInFavour, args.RequestingPeerId, args, _log))
@@ -295,10 +296,10 @@ func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 		for i := matchIndex + 1; i < nextIndex; i++ {
 
 			rf.markConfirmationStatusAccepted(i, peerId)
-			debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] marking Accepted of [%v] at index %v by %v [acceptedCount:%v] \n",
-				rf.me, currentTerm, (*rf.log)[i].Command, i, peerId, rf.confirmationStatusMap[i].acceptedCount))
 
 			rf.mu.Lock()
+			debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] marking Accepted of [%v] at index %v by %v [acceptedCount:%v] \n",
+				rf.me, currentTerm, (*rf.log)[i].Command, i, peerId, rf.confirmationStatusMap[i].acceptedCount))
 			if rf.confirmationStatusMap[i].acceptedCount >= (len(rf.peers)/2+1) && !(*rf.log)[i].IsCommitted {
 
 				debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] Leader Committing [%v] at index:%v confirmationStatusMap:%v\n",
@@ -728,6 +729,7 @@ func (rf *Raft) reconcileLogs(
 		}
 
 		rf.nextIndex = len(*rf.log)
+		rf.persist()
 	}
 	return updatedMatchIndex, _200_OK()
 }
@@ -741,6 +743,7 @@ func (rf *Raft) transitionBackToFollower(currentTerm int) {
 	debugLog(rf.me, fmt.Sprintf("[peer %v][term %v] transitionBackToFollower\n", rf.me, currentTerm))
 	rf.UpdateState(currentTerm, FollowerRole())
 	rf.resetElectionTimeoutChan <- true
+	rf.persist()
 }
 
 /* Helper functions */
