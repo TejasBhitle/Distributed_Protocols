@@ -378,6 +378,7 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 // as do the threads that read from applyCh.
 // returns index.
 func (cfg *config) one(cmd int, expectedServers int) int {
+	cfg.t.Logf("one(%v) expectedServers%v\n", cmd, expectedServers)
 	t0 := time.Now()
 	starts := 0
 	for time.Since(t0).Seconds() < 10 {

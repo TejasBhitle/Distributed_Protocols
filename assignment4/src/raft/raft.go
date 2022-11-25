@@ -251,9 +251,11 @@ func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 
 	matchIndex := rf.matchIndexesOf[peerId]
 	nextIndex := rf.nextIndex
-	//debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] preping to send AppendEntriesRPC to %v] matchIndex:%v nextIndex:%v\n",
-	//	rf.me, currentTerm, peerId, matchIndex, nextIndex))
+	//debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] Leader sendAppendEntries [log: %v] [matchIndex: %v] [nextIndex: %v]\n",
+	//	rf.me, currentTerm, , matchIndex, nextIndex))
 	logsToReplicate, logItemAtMatchIndex := getLogsToSend(rf.log, matchIndex, nextIndex)
+	//debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] Leader sendAppendEntries Success [log: %v] [matchIndex: %v] [nextIndex: %v]\n",
+	//	rf.me, currentTerm, *rf.log, matchIndex, nextIndex))
 
 	lastLogIndex, lastLogTerm := getLastLogIndexAndTerm(rf.log)
 
@@ -277,7 +279,7 @@ func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 		payload,
 	}
 	entryRequestReply := EntryRequestReply{}
-	debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] sending AppendEntriesRPC to %v] payload[%v]\n", rf.me, currentTerm, peerId, payload))
+	debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] sending AppendEntriesRPC to %v] payload[%v]  [leaderLog: %v]\n", rf.me, currentTerm, peerId, payload, *rf.log))
 
 	ok := rf.peers[peerId].Call("Raft.AppendEntriesOrHeartbeatRPC", entryRequestArgs, &entryRequestReply)
 	if ok {
@@ -648,7 +650,6 @@ func (rf *Raft) reconcileLogs(
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	//fmt.Printf("[peer %v][term %v] reconcileLogs begin\n", peerId, peerTerm)
 
 	leaderLogsToReplicate := args.EntryRequestPayload.LogsToReplicate
 	//leaderTerm := args.LeaderTerm
@@ -657,15 +658,13 @@ func (rf *Raft) reconcileLogs(
 	logItemAtMatchIndex := args.EntryRequestPayload.LogItemAtMatchIndex
 	updatedMatchIndex := matchIndex
 
-	peerLastLogIndex := len(*rf.log) - 1
-	peerLastLogTerm := -1
-	if peerLastLogIndex != -1 {
-		peerLastLogTerm = (*rf.log)[peerLastLogIndex].Term
-	}
+	peerLastLogIndex, peerLastLogTerm := getLastLogIndexAndTerm(rf.log)
+	//debugLog(peerId, fmt.Sprintf("[peer %v][term %v] reconcileLogs ENTRY [LeaderLastLogTerm %v] [peerLastLogTerm %v] ; [LeaderLastLogIndex %v] [PeerLastLogIndex: %v] [PeerLog %v]\n",
+	//	peerId, peerTerm, args.EntryRequestPayload.LastLogTerm, peerLastLogTerm, args.EntryRequestPayload.LastLogIndex, peerLastLogIndex, rf.log))
 
 	if args.EntryRequestPayload.LastLogTerm < peerLastLogTerm || (args.EntryRequestPayload.LastLogTerm == peerLastLogTerm && args.EntryRequestPayload.LastLogIndex < peerLastLogIndex) {
 		// reject heartbeat/appendEntries
-		debugLog(peerId, fmt.Sprintf("[peer %v][term %v] reconcileLogs reject_401  [LeaderLastLogTerm %v] [peerLastLogTerm%v] ; [LeaderLastLogIndex%v] [PeerLastLogIndex:%v]\n",
+		debugLog(peerId, fmt.Sprintf("[peer %v][term %v] reconcileLogs reject_401  [LeaderLastLogTerm %v] [peerLastLogTerm %v] ; [LeaderLastLogIndex %v] [PeerLastLogIndex: %v]\n",
 			peerId, peerTerm, args.EntryRequestPayload.LastLogTerm, peerLastLogTerm, args.EntryRequestPayload.LastLogIndex, peerLastLogIndex))
 		return -1, _401_OlderTerm()
 	}
@@ -694,6 +693,7 @@ func (rf *Raft) reconcileLogs(
 			return -1, _403_UnequalLogsAtMatchIndex()
 		}
 
+		rf.currentTerm = args.LeaderTerm
 		for i := 0; i < len(leaderLogsToReplicate); i++ {
 			peerIndex := matchIndex + 1 + i
 			if peerIndex == len(*rf.log) {
@@ -717,22 +717,30 @@ func (rf *Raft) reconcileLogs(
 			}
 		}
 
+		//debugLog(peerId, fmt.Sprintf("[peer %v][term %v] reconcileLogs: [peerLog before trimming :%v]\n", peerId, peerTerm, *rf.log))
 		// trimming unwanted entries from peerlog
 		trimLength := leaderLogLen
 		if matchIndex != -1 {
-			trimLength += matchIndex
+			trimLength += updatedMatchIndex
 		}
 		if len(*rf.log) > trimLength {
 			*rf.log = (*rf.log)[:trimLength]
 		}
 
+		rf.nextIndex = len(*rf.log)
 	}
 	return updatedMatchIndex, _200_OK()
 }
 
 func (rf *Raft) transitionBackToFollower(currentTerm int) {
+	if rf.peerRole == FollowerRole() {
+		// already a follower
+		return
+	}
+
 	debugLog(rf.me, fmt.Sprintf("[peer %v][term %v] transitionBackToFollower\n", rf.me, currentTerm))
 	rf.UpdateState(currentTerm, FollowerRole())
+	rf.resetElectionTimeoutChan <- true
 }
 
 /* Helper functions */
