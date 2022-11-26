@@ -339,7 +339,7 @@ func TestBackup(t *testing.T) {
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
 
-	fmt.Print("Test: leader backs up quickly over incorrect follower Logs...")
+	fmt.Print("Test: leader backs up quickly over incorrect follower logs...")
 
 	cfg.one(rand.Int(), servers)
 
@@ -381,7 +381,6 @@ func TestBackup(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader2].Start(rand.Int())
 	}
-	fmt.Print("Test: 50 checks passed...")
 
 	time.Sleep(RaftElectionTimeout / 2)
 
@@ -397,7 +396,6 @@ func TestBackup(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3)
 	}
-	fmt.Print("Test: 50 backup checks passed...")
 
 	// now everyone
 	for i := 0; i < servers; i++ {
@@ -573,6 +571,7 @@ func TestPersist2(t *testing.T) {
 
 	index := 1
 	for iters := 0; iters < 5; iters++ {
+		fmt.Printf("... Starting iteration %v", iters)
 		cfg.one(10+index, servers)
 		index++
 
@@ -603,6 +602,7 @@ func TestPersist2(t *testing.T) {
 
 		cfg.connect((leader1 + 4) % servers)
 		cfg.connect((leader1 + 0) % servers)
+		fmt.Printf("... Passed iteration %v", iters)
 	}
 
 	cfg.one(1000, servers)

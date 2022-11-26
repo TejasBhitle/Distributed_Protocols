@@ -197,7 +197,6 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VotedInFavour = votedFor == args.RequestingPeerId
 
 	} else {
-
 		peerLastLogIndex, peerLastLogTerm := getLastLogIndexAndTerm(_log)
 
 		if args.RequestingPeerTerm < rf.currentTerm {
@@ -414,7 +413,7 @@ func Make(peers []*labrpc.ClientEnd,
 
 	// Making this channels buffered as a value might be present on this chan when this peer goes down
 	// and new value wont get added to chan when this peer comes up again
-	rf.resetElectionTimeoutChan = make(chan bool, 20)
+	rf.resetElectionTimeoutChan = make(chan bool, 900000)
 
 	// just started peer, should be a follower with term as 0
 	rf.UpdateState(0, FollowerRole())
@@ -636,12 +635,14 @@ func (rf *Raft) AppendEntriesOrHeartbeatRPC(args EntryRequestArgs, reply *EntryR
 		if rf.peerRole != FollowerRole() {
 			rf.peerRole = FollowerRole()
 		}
+
 		rf.resetElectionTimeoutChan <- true
 	}
 
 	reply.Term = currentTerm
 	reply.UpdatedMatchIndex = updatedMatchIndex
 	reply.ErrorCode = errorCode
+	debugLog(rf.me, fmt.Sprintf("[peer %v][term %v] AppendEntriesRPC responding %v with reply [%v]\n", rf.me, currentTerm, args.LeaderId, &reply))
 }
 
 func (rf *Raft) reconcileLogs(
