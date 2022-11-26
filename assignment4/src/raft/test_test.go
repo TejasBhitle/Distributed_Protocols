@@ -571,29 +571,38 @@ func TestPersist2(t *testing.T) {
 
 	index := 1
 	for iters := 0; iters < 5; iters++ {
-		fmt.Printf("... Starting iteration %v", iters)
+		fmt.Printf("... Starting iteration %v\n", iters)
 		cfg.one(10+index, servers)
 		index++
 
 		leader1 := cfg.checkOneLeader()
-
+		fmt.Printf("... Leader is %v\n", leader1)
+		fmt.Printf("... Disconnecting peer %v\n", (leader1+1)%servers)
+		fmt.Printf("... Disconnecting peer %v\n", (leader1+2)%servers)
 		cfg.disconnect((leader1 + 1) % servers)
 		cfg.disconnect((leader1 + 2) % servers)
 
 		cfg.one(10+index, servers-2)
 		index++
 
+		fmt.Printf("... Disconnecting peer %v\n", (leader1+0)%servers)
+		fmt.Printf("... Disconnecting peer %v\n", (leader1+3)%servers)
+		fmt.Printf("... Disconnecting peer %v\n", (leader1+4)%servers)
 		cfg.disconnect((leader1 + 0) % servers)
 		cfg.disconnect((leader1 + 3) % servers)
 		cfg.disconnect((leader1 + 4) % servers)
 
+		fmt.Printf("... Connecting peer %v\n", (leader1+1)%servers)
+		fmt.Printf("... Connecting peer %v\n", (leader1+2)%servers)
 		cfg.start1((leader1 + 1) % servers)
 		cfg.start1((leader1 + 2) % servers)
 		cfg.connect((leader1 + 1) % servers)
 		cfg.connect((leader1 + 2) % servers)
 
+		fmt.Printf("... Sleeping for timeout \n")
 		time.Sleep(RaftElectionTimeout)
 
+		fmt.Printf("... Connecting peer %v\n", (leader1+3)%servers)
 		cfg.start1((leader1 + 3) % servers)
 		cfg.connect((leader1 + 3) % servers)
 
@@ -602,7 +611,7 @@ func TestPersist2(t *testing.T) {
 
 		cfg.connect((leader1 + 4) % servers)
 		cfg.connect((leader1 + 0) % servers)
-		fmt.Printf("... Passed iteration %v", iters)
+		fmt.Printf("... Passed iteration %v\n", iters)
 	}
 
 	cfg.one(1000, servers)

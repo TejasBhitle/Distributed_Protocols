@@ -328,6 +328,7 @@ func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 		rf.matchIndexesOf[peerId] = -1
 		rf.mu.Unlock()
 		go rf.sendAppendEntries(peerId, currentTerm)
+		rf.persist()
 		break
 
 	}
@@ -428,7 +429,7 @@ func Make(peers []*labrpc.ClientEnd,
 	rf.confirmationStatusMap = map[int]ConfirmationStatus{}
 
 	rf.startElectionTimeoutBackgroundProcess()
-
+	debugLog(rf.me, fmt.Sprintf("[Peer %v][term %v] Make..............\n", rf.me, rf.currentTerm))
 	return rf
 }
 
@@ -523,8 +524,9 @@ func (rf *Raft) tryTakingLeaderRole() {
 					// transition back to follower
 					debugLog(rf.me, fmt.Sprintf("[Candidate %v][term %v] transitionBackToFollower : Peer[%v] responded with Term[%v] > currentTerm[%v]\n",
 						rf.me, rf.currentTerm, index, requestVoteReply.RespondingPeerTerm, currentTerm))
-					rf.transitionBackToFollower(rf.currentTerm)
+					rf.transitionBackToFollower(requestVoteReply.RespondingPeerTerm)
 				}
+				rf.persist()
 			}
 		}(index, requestVoteArgs, requestVoteReply)
 	}
@@ -730,8 +732,8 @@ func (rf *Raft) reconcileLogs(
 		}
 
 		rf.nextIndex = len(*rf.log)
-		rf.persist()
 	}
+	rf.persist()
 	return updatedMatchIndex, _200_OK()
 }
 
