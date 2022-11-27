@@ -668,6 +668,7 @@ func TestFigure8(t *testing.T) {
 
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
+		fmt.Printf("....... Iteration %v started\n", iters)
 		leader := -1
 		for i := 0; i < servers; i++ {
 			if cfg.rafts[i] != nil {
@@ -699,6 +700,7 @@ func TestFigure8(t *testing.T) {
 				nup += 1
 			}
 		}
+		fmt.Printf("....... Iteration %v passed\n", iters)
 	}
 
 	for i := 0; i < servers; i++ {

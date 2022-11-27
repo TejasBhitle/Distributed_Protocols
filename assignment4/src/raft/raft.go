@@ -297,8 +297,8 @@ func (rf *Raft) sendAppendEntries(peerId int, currentTerm int) bool {
 			rf.markConfirmationStatusAccepted(i, peerId)
 
 			rf.mu.Lock()
-			debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] marking Accepted of [%v] at index %v by %v [acceptedCount:%v] \n",
-				rf.me, currentTerm, (*rf.log)[i].Command, i, peerId, rf.confirmationStatusMap[i].acceptedCount))
+			//debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] marking Accepted of [%v] at index %v by %v [acceptedCount:%v] \n",
+			//	rf.me, currentTerm, (*rf.log)[i].Command, i, peerId, rf.confirmationStatusMap[i].acceptedCount))
 			if rf.confirmationStatusMap[i].acceptedCount >= (len(rf.peers)/2+1) && !(*rf.log)[i].IsCommitted {
 
 				debugLog(rf.me, fmt.Sprintf("[Leader %v][term %v] Leader Committing [%v] at index:%v confirmationStatusMap:%v\n",
@@ -926,7 +926,7 @@ func _403_UnequalLogsAtMatchIndex() ErrorCode             { return ErrorCode{403
 
 // LOGGER
 func debugLog(peerId int, logString string) {
-	if true {
+	if false {
 		f, err := os.OpenFile("debug-"+strconv.Itoa(peerId)+".log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			log.Println(err)
