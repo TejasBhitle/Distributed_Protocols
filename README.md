@@ -1,4 +1,4 @@
-# Programming Assignments of Distributed Systems Coursework
+# Distributed Systems Coursework
 
 ### Overview
 
