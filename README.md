@@ -1,4 +1,4 @@
-# Programming Assignments of CSE 486/586
+# Programming Assignments of Distributed Systems Coursework
 
 ### Overview
 
@@ -12,11 +12,6 @@ Assignment 2 works on a more complicated protocol—distributed snapshot. It exp
 Assignment 3 and 4 implement Raft, a complex consensus protocol. It expects you to solve difficult problems in distributed systems.
 
 
-### System and Language Requirement
-
-* You can develop your code on any OS, e.g., MacOS, Windows, Linux. Please note that TAs will grade your assignments on Ubuntu. 
-* The assignments are written in Go. The tests are known to work with Go v1.13 and above. 
-* Git is required for assignment submission.
 
 
 ### Acknowledgements
